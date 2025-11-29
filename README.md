@@ -114,9 +114,21 @@ This will launch the Interactive Research App on http://0.0.0.0:8234
 
 ### 3. Use the Demo
 
-Open your browser to http://0.0.0.0:8234 to use the demo.
+In Google Chrome, go to chrome://flags/ search for "Split View" and enable it.
 
-For best result, also open the Temporal UI in browser, side by side with the demo UI.
+Close and re-open Chrome for it to take effect.
+
+Open a new browser window with two tabs:
+
+Tab 1: Application UI — http://0.0.0.0:8234
+Tab 2: Temporal UI — http://localhost:8233/ (OSS) or https://cloud.temporal.io/namespaces/XXX/workflows (Temporal Cloud)
+
+Right-click Tab 1, choose Add Tab to New Split View, and click the Workflows tab as the right-hand side.
+
+Re-position the window divider so that the chat UI is taking up approximately 1/3 of the screen, leading the rest for the Temporal UI.
+
+<img width="1498" height="807" alt="Side-by-side view of application UI and Temporal UI" src="https://github.com/user-attachments/assets/e236a56c-e0bb-4688-a4a1-5484441bfbae" />
+
 
 **Output:**
 
