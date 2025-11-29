@@ -66,7 +66,7 @@ temporal server start-dev
 # TEMPORAL_PROFILE=cloud
 ```
 
-## 2. Run the following commands:
+2. Run the following commands:
 
 ```
 temporal config set --profile cloud --prop address --value "CLOUD_REMOTE_ADDRESS"
