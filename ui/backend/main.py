@@ -150,10 +150,10 @@ async def serve_success():
 static_path = Path(__file__).parent.parent
 if static_path.exists():
     app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
-images_path = Path(__file__).parent.parent.parent / "temp_images"
-if images_path.exists():
-    app.mount("/temp_images", StaticFiles(directory=str(images_path)), name="images")
 
+images_path = Path(__file__).resolve().parent.parent.parent / "temp_images"
+images_path.mkdir(exist_ok=True)
+app.mount("/temp_images", StaticFiles(directory=str(images_path)), name="images")
 
 # ============================================
 # API Endpoints
