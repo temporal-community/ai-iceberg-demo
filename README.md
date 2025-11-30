@@ -45,7 +45,8 @@ This example is designed to be similar to the OpenAI Cookbook: [Introduction to 
 3. **OpenAI API Key** - Set as environment variable `OPENAI_API_KEY` in .env file (note, you will need enough quota on in your [OpenAI account](https://platform.openai.com/api-keys) to run this demo)
 4. **PDF Generation Dependencies** - Required for PDF output (optional)
 
-### Run Temporal Server Locally
+## Install / Upgrade Temporal CLI
+You'll need the latest version to run the demo.
 
 ```bash
 # Install Temporal CLI
@@ -53,12 +54,16 @@ curl -sSf https://temporal.download/cli.sh | sh
 
 # Alternately, upgrade to the latest version:
 brew upgrade temporal
+```
 
+### Run Temporal Server Locally
+
+```
 # Start Temporal server
 temporal server start-dev
 ```
 
-### Connect to Temporal Cloud
+### Or, Connect to Temporal Cloud
 
 1. Uncomment the following line in your `.env` file:
 
