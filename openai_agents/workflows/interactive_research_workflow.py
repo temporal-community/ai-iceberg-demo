@@ -47,7 +47,9 @@ async def process_clarification(
     )
 
     # Simulate cloud provider outages for the second-to-last question
-    is_second_last_question = (input.current_question_index + 2) == input.total_questions
+    is_second_last_question = (
+        input.current_question_index + 2
+    ) == input.total_questions
     if is_second_last_question:
         attempt = activity.info().attempt
         if attempt == 1:
@@ -152,7 +154,6 @@ class InteractiveResearchWorkflow:
 
             # If research is initialized but not completed, handle the clarification flow
             if self.research_initialized and not self.research_completed:
-
                 # If we have clarification questions, wait for all responses
                 if self.clarification_questions:
                     # Wait for all clarifications to be collected

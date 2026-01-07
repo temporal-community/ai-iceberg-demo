@@ -69,9 +69,29 @@ class ResearchClient {
         }
 
         const response = await fetch(`${this.baseUrl}/api/result/${id}`);
-        
+
         if (!response.ok) {
             throw new Error('Result not ready or failed');
+        }
+
+        return await response.json();
+    }
+
+    async listConversations(limit = 50, offset = 0) {
+        const response = await fetch(`${this.baseUrl}/api/conversations?limit=${limit}&offset=${offset}`);
+
+        if (!response.ok) {
+            throw new Error('Failed to list conversations');
+        }
+
+        return await response.json();
+    }
+
+    async getConversation(workflowId) {
+        const response = await fetch(`${this.baseUrl}/api/conversations/${workflowId}`);
+
+        if (!response.ok) {
+            throw new Error('Failed to get conversation');
         }
 
         return await response.json();
@@ -85,11 +105,11 @@ class ResearchClient {
         }
 
         this.eventSource = new EventSource(`${this.baseUrl}/api/stream/${id}`);
-        
+
         this.eventSource.onmessage = (event) => {
             const data = JSON.parse(event.data);
             onUpdate(data);
-            
+
             if (data.status === 'complete') {
                 this.closeStream();
                 if (onComplete) onComplete(data);
@@ -118,7 +138,7 @@ class ResearchClient {
             try {
                 const status = await this.getStatus(id);
                 onUpdate(status);
-                
+
                 if (status.status !== 'complete' && status.status !== 'failed') {
                     setTimeout(poll, interval);
                 }

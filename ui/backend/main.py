@@ -9,6 +9,9 @@ Environment Variables:
 - TEMPORAL_NAMESPACE: Temporal namespace (default: default)
 - TEMPORAL_API_KEY: API key for Temporal Cloud (disabled by default)
 - TEMPORAL_TASK_QUEUE: Task queue name (default: research-queue)
+- NEO4J_URI: Neo4j connection URI (default: bolt://localhost:7687)
+- NEO4J_USER: Neo4j username (default: neo4j)
+- NEO4J_PASSWORD: Neo4j password (required for memory features)
 """
 
 import os
@@ -26,6 +29,7 @@ from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.envconfig import ClientConfig
 
+from openai_agents.memory.neo4j_memory import get_neo4j_memory
 from openai_agents.workflows.interactive_research_workflow import (
     InteractiveResearchResult,
     InteractiveResearchWorkflow,
@@ -115,6 +119,14 @@ class ResearchResultResponse(BaseModel):
     follow_up_questions: List[str]
 
 
+class ConversationResponse(BaseModel):
+    conversation_id: str
+    workflow_id: str
+    original_query: str
+    status: str
+    created_at: str
+
+
 # ============================================
 # Static File Serving
 # ============================================
@@ -174,6 +186,18 @@ async def start_research(request: StartResearchRequest):
         UserQueryInput(query=request.query.strip()),
     )
 
+    # Save conversation to Neo4j memory
+    memory = await get_neo4j_memory()
+    if memory:
+        try:
+            await memory.create_conversation(
+                workflow_id=workflow_id,
+                original_query=request.query.strip(),
+                status=status.status,
+            )
+        except Exception as e:
+            print(f"Warning: Failed to save conversation to Neo4j: {e}")
+
     return {
         "workflow_id": workflow_id,
         "status": "started",
@@ -195,6 +219,16 @@ async def get_status(workflow_id: str):
     client = await get_temporal_client()
     handle = client.get_workflow_handle(workflow_id)
     status = await handle.query(InteractiveResearchWorkflow.get_status)
+
+    # Update conversation status in Neo4j
+    memory = await get_neo4j_memory()
+    if memory:
+        try:
+            await memory.update_conversation_status(
+                workflow_id=workflow_id, status=status.status
+            )
+        except Exception as e:
+            print(f"Warning: Failed to update conversation status in Neo4j: {e}")
 
     response = {
         "workflow_id": workflow_id,
@@ -324,15 +358,67 @@ async def stream_status(workflow_id: str):
     )
 
 
+@app.get("/api/conversations")
+async def list_conversations(limit: int = 50, offset: int = 0):
+    """
+    List all conversations from Neo4j memory.
+
+    Returns:
+        List of conversation objects with workflow_id, original_query, status, etc.
+    """
+    memory = await get_neo4j_memory()
+    if not memory:
+        return {"conversations": [], "error": "Neo4j memory not available"}
+
+    try:
+        conversations = await memory.list_conversations(limit=limit, offset=offset)
+        return {
+            "conversations": [conv.to_dict() for conv in conversations],
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to list conversations: {str(e)}"
+        )
+
+
+@app.get("/api/conversations/{workflow_id}")
+async def get_conversation(workflow_id: str):
+    """
+    Get a specific conversation by workflow ID.
+
+    Returns:
+        Conversation object with workflow_id, original_query, status, etc.
+    """
+    memory = await get_neo4j_memory()
+    if not memory:
+        raise HTTPException(status_code=503, detail="Neo4j memory not available")
+
+    try:
+        conversation = await memory.get_conversation(workflow_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        return conversation.to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get conversation: {str(e)}"
+        )
+
+
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint"""
+    memory = await get_neo4j_memory()
+    neo4j_status = "connected" if memory else "not_configured"
+
     return {
         "status": "healthy",
         # "temporal_profile": TEMPORAL_PROFILE,
         "temporal_address": temporal_config.get("target_host"),
         "temporal_namespace": temporal_config.get("namespace"),
         "task_queue": TEMPORAL_TASK_QUEUE,
+        "neo4j_memory": neo4j_status,
     }
 
 
