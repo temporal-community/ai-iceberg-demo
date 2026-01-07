@@ -16,6 +16,7 @@ dependencies = [
     "dotenv>=0.9.9",
     "fastapi>=0.122.0",
     "uvicorn>=0.37.0",
+    "neo4j>=5.0.0,<6",
 ]
 
 [project.urls]

@@ -15,10 +15,28 @@
         <svg class="temporal-logo" width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
             <path d="M32.4154 15.5846C31.2802 7.09512 28.4175 0 24 0C19.5949 0 16.7198 7.09512 15.5846 15.5846C7.09511 16.7198 0 19.5825 0 24C0 28.4051 7.09511 31.2802 15.5846 32.4154C16.7198 40.9049 19.5825 48 24 48C28.4051 48 31.2802 40.9049 32.4154 32.4154C40.9049 31.2802 48 28.4175 48 24C48 19.5825 40.9049 16.7075 32.4154 15.5846ZM15.3131 29.9229C7.18149 28.7506 2.43084 26.0607 2.43084 23.9877C2.43084 21.9147 7.16915 19.2247 15.3131 18.0524C15.128 20.0144 15.0416 22.0134 15.0416 23.9877C15.0416 25.962 15.128 27.9733 15.3131 29.9229ZM24 2.41851C26.073 2.41851 28.763 7.15682 29.9352 15.3008C27.9733 15.1157 25.9743 15.0293 24 15.0293C22.0257 15.0293 20.0267 15.128 18.0648 15.3008C19.237 7.16916 21.927 2.41851 24 2.41851ZM32.6869 29.9229C32.292 29.9846 30.6386 30.1697 30.2314 30.219C30.1943 30.6386 29.9969 32.2797 29.9352 32.6746C28.763 40.8062 26.073 45.5568 24 45.5568C21.927 45.5568 19.237 40.8185 18.0648 32.6746C18.0031 32.2797 17.818 30.6262 17.7686 30.219C17.5835 28.2941 17.4602 26.2211 17.4602 23.9877C17.4602 21.7542 17.5712 19.6936 17.7686 17.7563C19.6936 17.5712 21.7666 17.4478 24 17.4478C26.2334 17.4478 28.2941 17.5589 30.2314 17.7563C30.6509 17.7933 32.292 17.9907 32.6869 18.0524C40.8185 19.2247 45.5691 21.9147 45.5691 23.9877C45.5691 26.0607 40.8185 28.7506 32.6869 29.9229Z" fill="#F8FAFC"/>
         </svg>
-        
+
         <!-- Main Heading -->
         <h1 class="main-heading">Build Durable Agents</h1>
         <p class="subtitle">Powered by Temporal</p>
+
+        <!-- Conversation History Sidebar -->
+        <div class="conversation-history" id="conversationHistory" style="display: none;">
+            <div class="conversation-history-header">
+                <h3>Previous Conversations</h3>
+                <button class="close-history" id="closeHistoryBtn">×</button>
+            </div>
+            <div class="conversation-list" id="conversationList">
+                <div class="conversation-loading">Loading conversations...</div>
+            </div>
+        </div>
+
+        <!-- Show History Button -->
+        <button class="show-history-btn" id="showHistoryBtn" title="Show conversation history">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 12h18M3 6h18M3 18h18"/>
+            </svg>
+        </button>
 
         <!-- Chat Container -->
         <div class="chat-container" id="chatContainer">
@@ -115,9 +133,9 @@
         // Backend URL - update this for your environment
         // ============================================
         const API_BASE_URL = 'http://localhost:8234';
-        
+
         const client = new ResearchClient(API_BASE_URL);
-        
+
         // ============================================
         // UI Logic
         // ============================================
@@ -125,9 +143,20 @@
         const userInput = document.querySelector('.user-input');
         const submitButton = document.querySelector('.submit-button');
         const spinnerContainer = document.getElementById('spinnerContainer');
-        
+
         let workflowId = null;
         let currentQuestionIndex = 0;
+
+        // Load workflow ID from localStorage on page load
+        const savedWorkflowId = localStorage.getItem('workflowId');
+        if (savedWorkflowId) {
+            workflowId = savedWorkflowId;
+            // Try to resume the conversation
+            resumeConversation(savedWorkflowId);
+        }
+
+        // Load conversation history on page load
+        loadConversationHistory();
 
         // Add message to chat with animation
         function addMessage(text, isUser = false) {
@@ -166,15 +195,17 @@
                 if (!workflowId) {
                     // First submission - start new research workflow
                     const result = await client.startResearch(query);
-                    workflowId = result.workflow_id;
+                    saveWorkflowId(result.workflow_id);
+                    // Refresh conversation history to show the new conversation
+                    loadConversationHistory();
                 } else {
                     // Subsequent submissions - answer clarification question
                     await client.submitAnswer(query, workflowId, currentQuestionIndex);
                 }
-                
+
                 // Poll for next status
                 pollStatus();
-                
+
             } catch (error) {
                 console.error('Error:', error);
                 showSpinner(false);
@@ -186,7 +217,7 @@
         async function pollStatus() {
             try {
                 const status = await client.getStatus(workflowId);
-              
+
                 if (
                   (status.status === 'awaiting_clarifications' && status.current_question) ||
                   status.status === 'collecting_answers') {
@@ -198,20 +229,23 @@
                 } else if (status.status === 'researching') {
                     // Keep spinner visible, continue polling
                     setTimeout(pollStatus, 1000);
-                    
+
                 } else if (status.status === 'completed') {
                     // Research complete - get result and redirect
                     showSpinner(false);
                     const result = await client.getResult(workflowId);
-                    
+
                     // Store result in sessionStorage for success page
                     sessionStorage.setItem('researchResult', JSON.stringify(result));
                     sessionStorage.setItem('workflowId', workflowId);
-                    
+
+                    // Clear workflow ID from localStorage since conversation is complete
+                    clearWorkflowId();
+
                     console.log("redirecting...");
                     // Redirect to success page
                     window.location.href = 'success';
-                    
+
                 } else {
                     // Other states - keep polling
                     setTimeout(pollStatus, 1000);
@@ -222,6 +256,140 @@
             }
         }
 
+        // Save workflow ID to localStorage
+        function saveWorkflowId(id) {
+            workflowId = id;
+            localStorage.setItem('workflowId', id);
+        }
+
+        // Clear workflow ID from localStorage
+        function clearWorkflowId() {
+            workflowId = null;
+            localStorage.removeItem('workflowId');
+        }
+
+        // Load conversation history
+        async function loadConversationHistory() {
+            try {
+                const response = await client.listConversations(20, 0);
+                const conversations = response.conversations || [];
+                displayConversationHistory(conversations);
+            } catch (error) {
+                console.error('Failed to load conversation history:', error);
+                // Hide history button if Neo4j is not available
+                document.getElementById('showHistoryBtn').style.display = 'none';
+            }
+        }
+
+        // Display conversation history in sidebar
+        function displayConversationHistory(conversations) {
+            const listContainer = document.getElementById('conversationList');
+
+            if (conversations.length === 0) {
+                listContainer.innerHTML = '<div class="conversation-empty">No previous conversations</div>';
+                return;
+            }
+
+            listContainer.innerHTML = conversations.map(conv => {
+                const date = new Date(conv.created_at);
+                const dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                const statusClass = getStatusClass(conv.status);
+                const queryPreview = conv.original_query.length > 50
+                    ? conv.original_query.substring(0, 50) + '...'
+                    : conv.original_query;
+
+                return `
+                    <div class="conversation-item ${conv.workflow_id === workflowId ? 'active' : ''}"
+                         data-workflow-id="${conv.workflow_id}">
+                        <div class="conversation-query">${escapeHtml(queryPreview)}</div>
+                        <div class="conversation-meta">
+                            <span class="conversation-status ${statusClass}">${conv.status}</span>
+                            <span class="conversation-date">${dateStr}</span>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            // Add click handlers to conversation items
+            listContainer.querySelectorAll('.conversation-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    const id = item.dataset.workflowId;
+                    resumeConversation(id);
+                    hideConversationHistory();
+                });
+            });
+        }
+
+        // Get status class for styling
+        function getStatusClass(status) {
+            const statusMap = {
+                'pending': 'status-pending',
+                'awaiting_clarifications': 'status-awaiting',
+                'collecting_answers': 'status-collecting',
+                'researching': 'status-researching',
+                'completed': 'status-completed',
+                'ended': 'status-ended'
+            };
+            return statusMap[status] || 'status-unknown';
+        }
+
+        // Escape HTML to prevent XSS
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Resume a conversation
+        async function resumeConversation(id) {
+            try {
+                saveWorkflowId(id);
+
+                // Clear current chat
+                chatContainer.innerHTML = '';
+
+                // Get conversation details
+                const conversation = await client.getConversation(id);
+                addMessage(`Resuming conversation: "${conversation.original_query}"`, false);
+
+                // Get current status
+                const status = await client.getStatus(id);
+                currentQuestionIndex = status.current_question_index;
+
+                // Add original query
+                if (status.original_query) {
+                    addMessage(status.original_query, true);
+                }
+
+                // Show current state
+                if (status.status === 'awaiting_clarifications' && status.current_question) {
+                    addMessage(status.current_question);
+                } else if (status.status === 'researching') {
+                    showSpinner(true);
+                    pollStatus();
+                } else if (status.status === 'completed') {
+                    addMessage('This conversation is complete. Starting a new one...');
+                    clearWorkflowId();
+                } else {
+                    addMessage('Ready to continue. What would you like to do?');
+                }
+            } catch (error) {
+                console.error('Failed to resume conversation:', error);
+                addMessage('Failed to resume conversation. Please start a new one.');
+                clearWorkflowId();
+            }
+        }
+
+        // Show/hide conversation history
+        function showConversationHistory() {
+            document.getElementById('conversationHistory').style.display = 'block';
+            loadConversationHistory();
+        }
+
+        function hideConversationHistory() {
+            document.getElementById('conversationHistory').style.display = 'none';
+        }
+
         // Event listeners
         submitButton.addEventListener('click', handleSubmit);
         userInput.addEventListener('keypress', (e) => {
@@ -229,6 +397,10 @@
                 handleSubmit();
             }
         });
+
+        // Conversation history UI
+        document.getElementById('showHistoryBtn').addEventListener('click', showConversationHistory);
+        document.getElementById('closeHistoryBtn').addEventListener('click', hideConversationHistory);
     </script>
 </body>
 </html>

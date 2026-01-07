@@ -44,6 +44,7 @@ This example is designed to be similar to the OpenAI Cookbook: [Introduction to 
 2. Temporal Server - Must be running locally on localhost:7233 OR Connect to [Temporal Cloud](https://temporal.io)
 3. **OpenAI API Key** - Set as environment variable `OPENAI_API_KEY` in .env file (note, you will need enough quota on in your [OpenAI account](https://platform.openai.com/api-keys) to run this demo)
 4. **PDF Generation Dependencies** - Required for PDF output (optional)
+5. **Neo4j Database** (optional) - For conversation memory/persistence. See [Neo4j Setup](#neo4j-setup-optional) below.
 
 ## Install / Upgrade Temporal CLI
 You'll need the latest version to run the demo.
@@ -83,6 +84,49 @@ See https://docs.temporal.io/develop/environment-configuration for more details.
 
 For ease of use, all environemnt variables may be defined through the `.env` file,
 at the root of the repository. See the .env-sample file for details.
+
+## Neo4j Setup (Optional)
+
+Neo4j is used to persist conversation/workflow history, allowing users to resume previous conversations after page reloads. The app will work without Neo4j, but conversations won't be saved or resumable.
+
+### Option 1: Using Docker (Recommended)
+
+```bash
+docker run \
+    --name neo4j-research \
+    -p7474:7474 -p7687:7687 \
+    -e NEO4J_AUTH=neo4j/your-password \
+    neo4j:latest
+```
+
+Then update your `.env` file:
+```
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=your-password
+```
+
+### Option 2: Using Neo4j Desktop
+
+1. Download and install [Neo4j Desktop](https://neo4j.com/download/)
+2. Create a new database
+3. Start the database
+4. Note the connection details (usually `bolt://localhost:7687`)
+5. Update your `.env` file with the connection details
+
+### Option 3: Neo4j AuraDB (Cloud)
+
+1. Sign up for [Neo4j AuraDB](https://neo4j.com/cloud/aura/)
+2. Create a free instance
+3. Copy the connection URI and credentials
+4. Update your `.env` file:
+   ```
+   NEO4J_URI=neo4j+s://your-instance.databases.neo4j.io
+   NEO4J_USER=neo4j
+   NEO4J_PASSWORD=your-password
+   ```
+
+**Note:** If Neo4j is not configured, the app will gracefully degrade - all features will work except conversation history and resuming conversations.
 
 ## Setup
 
@@ -127,7 +171,23 @@ This will launch the Interactive Research App on http://0.0.0.0:8234
 
 ![UI Interface](ui/public/images/ui_img.png "UI Interface Img")
 
-### 3. Use the Demo
+### 3. (Optional) Start Neo4j
+
+If you've configured Neo4j for conversation memory:
+
+```bash
+# If using Docker
+docker start neo4j-research
+
+# If using Neo4j Desktop, start your database from the Desktop app
+```
+
+### 4. Use the Demo
+
+**Conversation Memory Features:**
+- Click the menu button (☰) in the top-right to view previous conversations
+- Click on any conversation to resume it
+- Your current conversation is automatically saved and can be resumed after page reload
 
 In Google Chrome, go to chrome://flags/ search for "Split View" and enable it.
 
