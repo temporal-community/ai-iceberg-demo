@@ -55,6 +55,79 @@ class ConversationNode:
         }
 
 
+class MessageNode:
+    """Represents a message in a conversation"""
+
+    def __init__(
+        self,
+        message_id: str,
+        workflow_id: str,
+        message_type: str,  # "human" or "ai"
+        content: str,
+        timestamp: datetime,
+        sequence: int,
+        message_category: Optional[
+            str
+        ] = None,  # e.g., "initial_query", "clarification_question", "clarification_answer"
+    ):
+        self.message_id = message_id
+        self.workflow_id = workflow_id
+        self.message_type = message_type
+        self.content = content
+        self.timestamp = timestamp
+        self.sequence = sequence
+        self.message_category = message_category
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for API responses"""
+        return {
+            "message_id": self.message_id,
+            "workflow_id": self.workflow_id,
+            "message_type": self.message_type,
+            "content": self.content,
+            "timestamp": self.timestamp.isoformat(),
+            "sequence": self.sequence,
+            "message_category": self.message_category,
+        }
+
+
+class ResultNode:
+    """Represents a research result in a conversation"""
+
+    def __init__(
+        self,
+        result_id: str,
+        workflow_id: str,
+        short_summary: str,
+        markdown_report: str,
+        timestamp: datetime,
+        sequence: int,
+        image_file_path: Optional[str] = None,
+        follow_up_questions: Optional[List[str]] = None,
+    ):
+        self.result_id = result_id
+        self.workflow_id = workflow_id
+        self.short_summary = short_summary
+        self.markdown_report = markdown_report
+        self.timestamp = timestamp
+        self.sequence = sequence
+        self.image_file_path = image_file_path
+        self.follow_up_questions = follow_up_questions or []
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for API responses"""
+        return {
+            "result_id": self.result_id,
+            "workflow_id": self.workflow_id,
+            "short_summary": self.short_summary,
+            "markdown_report": self.markdown_report,
+            "timestamp": self.timestamp.isoformat(),
+            "sequence": self.sequence,
+            "image_file_path": self.image_file_path,
+            "follow_up_questions": self.follow_up_questions,
+        }
+
+
 class Neo4jMemory:
     """Manages conversation memory in Neo4j"""
 
@@ -62,7 +135,7 @@ class Neo4jMemory:
         self,
         uri: str = NEO4J_URI,
         user: str = NEO4J_USER,
-        password: str = NEO4J_PASSWORD,
+        password: Optional[str] = NEO4J_PASSWORD,
     ):
         if not password:
             raise ValueError("NEO4J_PASSWORD environment variable is required")
@@ -88,15 +161,17 @@ class Neo4jMemory:
         """
         async with self.driver.session() as session:
             created_at = datetime.utcnow()
+            # Use MERGE to avoid duplicates if conversation already exists
             result = await session.run(
                 """
-                CREATE (c:Conversation {
-                    workflow_id: $workflow_id,
-                    original_query: $original_query,
-                    status: $status,
-                    created_at: $created_at,
-                    conversation_id: $workflow_id
-                })
+                MERGE (c:Conversation {workflow_id: $workflow_id})
+                ON CREATE SET
+                    c.original_query = $original_query,
+                    c.status = $status,
+                    c.created_at = $created_at,
+                    c.conversation_id = $workflow_id
+                ON MATCH SET
+                    c.status = $status
                 RETURN c
                 """,
                 workflow_id=workflow_id,
@@ -105,6 +180,7 @@ class Neo4jMemory:
                 created_at=created_at,
             )
             record = await result.single()
+            # Consume the result to ensure transaction commits
             if record:
                 node = record["c"]
                 return ConversationNode(
@@ -112,7 +188,7 @@ class Neo4jMemory:
                     original_query=node["original_query"],
                     created_at=node["created_at"],
                     status=node["status"],
-                    conversation_id=node["conversation_id"],
+                    conversation_id=node.get("conversation_id", workflow_id),
                 )
             raise Exception("Failed to create conversation node")
 
@@ -222,6 +298,383 @@ class Neo4jMemory:
                 )
             return conversations
 
+    async def add_message(
+        self,
+        workflow_id: str,
+        message_type: str,  # "human" or "ai"
+        content: str,
+        message_category: Optional[str] = None,
+    ) -> MessageNode:
+        """
+        Add a message to a conversation.
+
+        Args:
+            workflow_id: Temporal workflow ID
+            message_type: "human" or "ai"
+            content: The message content
+            message_category: Optional category (e.g., "initial_query", "clarification_question", "clarification_answer")
+
+        Returns:
+            MessageNode representing the created message
+        """
+        async with self.driver.session() as session:
+            # Get the next sequence number for this conversation (check both Message and Result nodes)
+            seq_result = await session.run(
+                """
+                MATCH (c:Conversation {workflow_id: $workflow_id})-[:HAS_MESSAGE|HAS_RESULT]->(n)
+                RETURN MAX(n.sequence) as max_seq
+                """,
+                workflow_id=workflow_id,
+            )
+            seq_record = await seq_result.single()
+            next_sequence = (
+                (seq_record["max_seq"] + 1)
+                if seq_record and seq_record["max_seq"] is not None
+                else 0
+            )
+
+            # Get the last node to link to (for NEXT relationship) - could be Message or Result
+            last_node_result = await session.run(
+                """
+                MATCH (c:Conversation {workflow_id: $workflow_id})-[:HAS_MESSAGE|HAS_RESULT]->(n)
+                WHERE n.sequence = $last_seq
+                RETURN
+                    CASE
+                        WHEN n:Message THEN n.message_id
+                        WHEN n:Result THEN n.result_id
+                    END as last_id
+                """,
+                workflow_id=workflow_id,
+                last_seq=next_sequence - 1,
+            )
+            last_node_record = await last_node_result.single()
+            last_node_id = last_node_record["last_id"] if last_node_record else None
+
+            # Create the message node
+            message_id = f"{workflow_id}-msg-{next_sequence}"
+            timestamp = datetime.utcnow()
+
+            if last_node_id:
+                # Link to previous node (could be Message or Result)
+                result = await session.run(
+                    """
+                    MATCH (c:Conversation {workflow_id: $workflow_id})
+                    MATCH (prev)
+                    WHERE (prev:Message AND prev.message_id = $last_node_id)
+                       OR (prev:Result AND prev.result_id = $last_node_id)
+                    CREATE (m:Message {
+                        message_id: $message_id,
+                        workflow_id: $workflow_id,
+                        message_type: $message_type,
+                        content: $content,
+                        timestamp: $timestamp,
+                        sequence: $sequence,
+                        message_category: $message_category
+                    })
+                    CREATE (c)-[:HAS_MESSAGE]->(m)
+                    CREATE (prev)-[:NEXT]->(m)
+                    RETURN m
+                    """,
+                    workflow_id=workflow_id,
+                    message_id=message_id,
+                    message_type=message_type,
+                    content=content,
+                    timestamp=timestamp,
+                    sequence=next_sequence,
+                    message_category=message_category,
+                    last_node_id=last_node_id,
+                )
+            else:
+                # First message, no previous to link to
+                result = await session.run(
+                    """
+                    MATCH (c:Conversation {workflow_id: $workflow_id})
+                    CREATE (m:Message {
+                        message_id: $message_id,
+                        workflow_id: $workflow_id,
+                        message_type: $message_type,
+                        content: $content,
+                        timestamp: $timestamp,
+                        sequence: $sequence,
+                        message_category: $message_category
+                    })
+                    CREATE (c)-[:HAS_MESSAGE]->(m)
+                    RETURN m
+                    """,
+                    workflow_id=workflow_id,
+                    message_id=message_id,
+                    message_type=message_type,
+                    content=content,
+                    timestamp=timestamp,
+                    sequence=next_sequence,
+                    message_category=message_category,
+                )
+
+            record = await result.single()
+            # Consume the result to ensure transaction commits
+            if record:
+                node = record["m"]
+                return MessageNode(
+                    message_id=node["message_id"],
+                    workflow_id=node["workflow_id"],
+                    message_type=node["message_type"],
+                    content=node["content"],
+                    timestamp=node["timestamp"],
+                    sequence=node["sequence"],
+                    message_category=node.get("message_category"),
+                )
+            raise Exception("Failed to create message node")
+
+    async def add_result(
+        self,
+        workflow_id: str,
+        short_summary: str,
+        markdown_report: str,
+        image_file_path: Optional[str] = None,
+        follow_up_questions: Optional[List[str]] = None,
+    ) -> ResultNode:
+        """
+        Add a research result to a conversation.
+
+        Args:
+            workflow_id: Temporal workflow ID
+            short_summary: Brief summary of the research findings
+            markdown_report: Full markdown research report
+            image_file_path: Optional path to generated image
+            follow_up_questions: Optional list of suggested follow-up questions
+
+        Returns:
+            ResultNode representing the created result
+        """
+        print(f"INFO: add_result() called for workflow {workflow_id}")
+        async with self.driver.session() as session:
+            # Get the next sequence number for this conversation (check both Message and Result nodes)
+            print(f"INFO: Getting next sequence number for workflow {workflow_id}")
+            seq_result = await session.run(
+                """
+                MATCH (c:Conversation {workflow_id: $workflow_id})-[:HAS_MESSAGE|HAS_RESULT]->(n)
+                RETURN MAX(n.sequence) as max_seq
+                """,
+                workflow_id=workflow_id,
+            )
+            seq_record = await seq_result.single()
+            next_sequence = (
+                (seq_record["max_seq"] + 1)
+                if seq_record and seq_record["max_seq"] is not None
+                else 0
+            )
+            print(f"INFO: Next sequence number: {next_sequence}")
+
+            # Get the last node to link to (for NEXT relationship) - could be Message or Result
+            last_node_result = await session.run(
+                """
+                MATCH (c:Conversation {workflow_id: $workflow_id})-[:HAS_MESSAGE|HAS_RESULT]->(n)
+                WHERE n.sequence = $last_seq
+                RETURN
+                    CASE
+                        WHEN n:Message THEN n.message_id
+                        WHEN n:Result THEN n.result_id
+                    END as last_id
+                """,
+                workflow_id=workflow_id,
+                last_seq=next_sequence - 1,
+            )
+            last_node_record = await last_node_result.single()
+            last_node_id = last_node_record["last_id"] if last_node_record else None
+
+            # Create the result node
+            result_id = f"{workflow_id}-result-{next_sequence}"
+            timestamp = datetime.utcnow()
+
+            if last_node_id:
+                # Link to previous node (could be Message or Result)
+                result = await session.run(
+                    """
+                    MATCH (c:Conversation {workflow_id: $workflow_id})
+                    MATCH (prev)
+                    WHERE (prev:Message AND prev.message_id = $last_node_id)
+                       OR (prev:Result AND prev.result_id = $last_node_id)
+                    CREATE (r:Result {
+                        result_id: $result_id,
+                        workflow_id: $workflow_id,
+                        short_summary: $short_summary,
+                        markdown_report: $markdown_report,
+                        timestamp: $timestamp,
+                        sequence: $sequence,
+                        image_file_path: $image_file_path,
+                        follow_up_questions: $follow_up_questions
+                    })
+                    CREATE (c)-[:HAS_RESULT]->(r)
+                    CREATE (prev)-[:NEXT]->(r)
+                    RETURN r
+                    """,
+                    workflow_id=workflow_id,
+                    result_id=result_id,
+                    short_summary=short_summary,
+                    markdown_report=markdown_report,
+                    timestamp=timestamp,
+                    sequence=next_sequence,
+                    image_file_path=image_file_path,
+                    follow_up_questions=follow_up_questions or [],
+                    last_node_id=last_node_id,
+                )
+            else:
+                # First node in conversation (unlikely for a result, but handle it)
+                result = await session.run(
+                    """
+                    MATCH (c:Conversation {workflow_id: $workflow_id})
+                    CREATE (r:Result {
+                        result_id: $result_id,
+                        workflow_id: $workflow_id,
+                        short_summary: $short_summary,
+                        markdown_report: $markdown_report,
+                        timestamp: $timestamp,
+                        sequence: $sequence,
+                        image_file_path: $image_file_path,
+                        follow_up_questions: $follow_up_questions
+                    })
+                    CREATE (c)-[:HAS_RESULT]->(r)
+                    RETURN r
+                    """,
+                    workflow_id=workflow_id,
+                    result_id=result_id,
+                    short_summary=short_summary,
+                    markdown_report=markdown_report,
+                    timestamp=timestamp,
+                    sequence=next_sequence,
+                    image_file_path=image_file_path,
+                    follow_up_questions=follow_up_questions or [],
+                )
+
+            record = await result.single()
+            # Consume the result to ensure transaction commits
+            if record:
+                node = record["r"]
+                print(
+                    f"INFO: ✅ Result node created successfully with ID: {node['result_id']}"
+                )
+                return ResultNode(
+                    result_id=node["result_id"],
+                    workflow_id=node["workflow_id"],
+                    short_summary=node["short_summary"],
+                    markdown_report=node["markdown_report"],
+                    timestamp=node["timestamp"],
+                    sequence=node["sequence"],
+                    image_file_path=node.get("image_file_path"),
+                    follow_up_questions=node.get("follow_up_questions", []),
+                )
+            print(f"ERROR: Failed to create result node - no record returned")
+            raise Exception("Failed to create result node")
+
+    async def get_messages(self, workflow_id: str, limit: Optional[int] = None) -> List:
+        """
+        Get all messages and results for a conversation, ordered by sequence.
+
+        Args:
+            workflow_id: Temporal workflow ID
+            limit: Optional limit on number of items to return
+
+        Returns:
+            List of MessageNode and ResultNode objects in sequence order
+        """
+        async with self.driver.session() as session:
+            if limit:
+                result = await session.run(
+                    """
+                    MATCH (c:Conversation {workflow_id: $workflow_id})-[:HAS_MESSAGE|HAS_RESULT]->(n)
+                    RETURN n
+                    ORDER BY n.sequence ASC
+                    LIMIT $limit
+                    """,
+                    workflow_id=workflow_id,
+                    limit=limit,
+                )
+            else:
+                result = await session.run(
+                    """
+                    MATCH (c:Conversation {workflow_id: $workflow_id})-[:HAS_MESSAGE|HAS_RESULT]->(n)
+                    RETURN n
+                    ORDER BY n.sequence ASC
+                    """,
+                    workflow_id=workflow_id,
+                )
+            items = []
+            async for record in result:
+                node = record["n"]
+                if "Message" in node.labels:
+                    # It's a Message node
+                    items.append(
+                        MessageNode(
+                            message_id=node["message_id"],
+                            workflow_id=node["workflow_id"],
+                            message_type=node["message_type"],
+                            content=node["content"],
+                            timestamp=node["timestamp"],
+                            sequence=node["sequence"],
+                            message_category=node.get("message_category"),
+                        )
+                    )
+                elif "Result" in node.labels:
+                    # It's a Result node
+                    items.append(
+                        ResultNode(
+                            result_id=node["result_id"],
+                            workflow_id=node["workflow_id"],
+                            short_summary=node["short_summary"],
+                            markdown_report=node["markdown_report"],
+                            timestamp=node["timestamp"],
+                            sequence=node["sequence"],
+                            image_file_path=node.get("image_file_path"),
+                            follow_up_questions=node.get("follow_up_questions", []),
+                        )
+                    )
+            return items
+
+    async def get_results(self, workflow_id: Optional[str] = None) -> List[ResultNode]:
+        """
+        Get all Result nodes, optionally filtered by workflow_id.
+
+        Args:
+            workflow_id: Optional workflow ID to filter results
+
+        Returns:
+            List of ResultNode objects
+        """
+        async with self.driver.session() as session:
+            if workflow_id:
+                result = await session.run(
+                    """
+                    MATCH (c:Conversation {workflow_id: $workflow_id})-[:HAS_RESULT]->(r:Result)
+                    RETURN r
+                    ORDER BY r.sequence ASC
+                    """,
+                    workflow_id=workflow_id,
+                )
+            else:
+                result = await session.run(
+                    """
+                    MATCH (r:Result)
+                    RETURN r
+                    ORDER BY r.timestamp DESC
+                    """,
+                )
+            results = []
+            async for record in result:
+                node = record["r"]
+                results.append(
+                    ResultNode(
+                        result_id=node["result_id"],
+                        workflow_id=node["workflow_id"],
+                        short_summary=node["short_summary"],
+                        markdown_report=node["markdown_report"],
+                        timestamp=node["timestamp"],
+                        sequence=node["sequence"],
+                        image_file_path=node.get("image_file_path"),
+                        follow_up_questions=node.get("follow_up_questions", []),
+                    )
+                )
+            return results
+
     async def verify_connection(self) -> bool:
         """
         Verify that the Neo4j connection is working.
@@ -241,13 +694,33 @@ async def get_neo4j_memory() -> Optional["Neo4jMemory"]:
     """Get or create the global Neo4j memory instance"""
     global neo4j_memory
     if neo4j_memory is None:
+        # Check if password is configured
+        if not NEO4J_PASSWORD:
+            print("INFO: Neo4j memory disabled - NEO4J_PASSWORD not set in environment")
+            return None
+
         try:
+            print(
+                f"INFO: Initializing Neo4j memory connection to {NEO4J_URI} as user {NEO4J_USER}"
+            )
             neo4j_memory = Neo4jMemory()
             # Verify connection
             if not await neo4j_memory.verify_connection():
-                print("Warning: Neo4j connection verification failed")
+                print(
+                    "ERROR: Neo4j connection verification failed - check your connection settings"
+                )
+                neo4j_memory = None
                 return None
+            print("INFO: Neo4j memory connection established successfully")
+        except ValueError as e:
+            print(f"ERROR: Neo4j configuration error: {e}")
+            neo4j_memory = None
+            return None
         except Exception as e:
-            print(f"Warning: Failed to initialize Neo4j memory: {e}")
+            print(f"ERROR: Failed to initialize Neo4j memory: {e}")
+            import traceback
+
+            traceback.print_exc()
+            neo4j_memory = None
             return None
     return neo4j_memory

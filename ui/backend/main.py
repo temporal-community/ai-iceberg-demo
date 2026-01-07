@@ -190,13 +190,28 @@ async def start_research(request: StartResearchRequest):
     memory = await get_neo4j_memory()
     if memory:
         try:
+            print(f"INFO: Saving conversation {workflow_id} to Neo4j")
             await memory.create_conversation(
                 workflow_id=workflow_id,
                 original_query=request.query.strip(),
                 status=status.status,
             )
+            print(f"INFO: Conversation {workflow_id} created successfully")
+            # Save the initial user query as a human message
+            await memory.add_message(
+                workflow_id=workflow_id,
+                message_type="human",
+                content=request.query.strip(),
+                message_category="initial_query",
+            )
+            print(f"INFO: Initial message saved for conversation {workflow_id}")
         except Exception as e:
-            print(f"Warning: Failed to save conversation to Neo4j: {e}")
+            print(f"ERROR: Failed to save conversation to Neo4j: {e}")
+            import traceback
+
+            traceback.print_exc()
+    else:
+        print("WARNING: Neo4j memory not available - conversation not persisted")
 
     return {
         "workflow_id": workflow_id,
@@ -227,8 +242,89 @@ async def get_status(workflow_id: str):
             await memory.update_conversation_status(
                 workflow_id=workflow_id, status=status.status
             )
+            # Only save the current question when it's first displayed (sequence matches chat order)
+            # This ensures messages are saved in the order they appear in the chat window
+            if status.status == "awaiting_clarifications" and status.current_question:
+                existing_messages = await memory.get_messages(workflow_id)
+                # Check if we've already saved this specific question
+                current_question_saved = any(
+                    m.content == status.current_question
+                    and m.message_category == "clarification_question"
+                    for m in existing_messages
+                )
+                # Only save if this is the first question (index 0) and it hasn't been saved yet
+                if status.current_question_index == 0 and not current_question_saved:
+                    await memory.add_message(
+                        workflow_id=workflow_id,
+                        message_type="ai",
+                        content=status.current_question,
+                        message_category="clarification_question",
+                    )
+            # If research is completed, save the result if it hasn't been saved yet
+            elif status.status == "completed":
+                print(
+                    f"INFO: Detected completed status for workflow {workflow_id}, checking for result..."
+                )
+                # Check if result already exists
+                existing_results = await memory.get_results(workflow_id)
+                print(f"INFO: Existing results count: {len(existing_results)}")
+                if not existing_results:
+                    # Try to get the result from the workflow
+                    try:
+                        print(
+                            f"INFO: Attempting to fetch result from workflow {workflow_id}..."
+                        )
+                        desc = await handle.describe()
+                        print(f"INFO: Workflow description status: {desc.status}")
+                        if desc.status and desc.status.name == "COMPLETED":
+                            print(f"INFO: Workflow is COMPLETED, fetching result...")
+                            result = await handle.result()
+                            # Handle both dict and InteractiveResearchResult objects
+                            if isinstance(result, dict):
+                                short_summary = result.get("short_summary", "")
+                                markdown_report = result.get("markdown_report", "")
+                                image_file_path = result.get("image_file_path")
+                                follow_up_questions = result.get(
+                                    "follow_up_questions", []
+                                )
+                            else:
+                                short_summary = result.short_summary
+                                markdown_report = result.markdown_report
+                                image_file_path = result.image_file_path
+                                follow_up_questions = result.follow_up_questions or []
+                            print(
+                                f"INFO: Got result, short_summary length: {len(short_summary)}, markdown length: {len(markdown_report)}"
+                            )
+                            await memory.add_result(
+                                workflow_id=workflow_id,
+                                short_summary=short_summary,
+                                markdown_report=markdown_report,
+                                image_file_path=image_file_path,
+                                follow_up_questions=follow_up_questions,
+                            )
+                            print(
+                                f"INFO: ✅ Research result saved as Result node for conversation {workflow_id} (from status check)"
+                            )
+                        else:
+                            print(
+                                f"WARNING: Workflow status is {desc.status}, not COMPLETED yet"
+                            )
+                    except Exception as result_error:
+                        print(
+                            f"ERROR: Could not save result when status became completed: {result_error}"
+                        )
+                        import traceback
+
+                        traceback.print_exc()
+                else:
+                    print(
+                        f"INFO: Result already exists for workflow {workflow_id}, skipping save"
+                    )
         except Exception as e:
             print(f"Warning: Failed to update conversation status in Neo4j: {e}")
+            import traceback
+
+            traceback.print_exc()
 
     response = {
         "workflow_id": workflow_id,
@@ -270,6 +366,38 @@ async def submit_answer(
 
     status = await handle.query(InteractiveResearchWorkflow.get_status)
 
+    # Save user's answer as a human message
+    memory = await get_neo4j_memory()
+    if memory:
+        try:
+            await memory.add_message(
+                workflow_id=workflow_id,
+                message_type="human",
+                content=request.answer.strip(),
+                message_category="clarification_answer",
+            )
+            # After saving the answer, save the next question if it exists
+            # This ensures questions are saved one at a time, matching chat order
+            if status.status in ["awaiting_clarifications", "collecting_answers"]:
+                next_question = status.get_current_question()
+                if next_question:
+                    # Check if we've already saved this question
+                    existing_messages = await memory.get_messages(workflow_id)
+                    question_already_saved = any(
+                        m.content == next_question
+                        and m.message_category == "clarification_question"
+                        for m in existing_messages
+                    )
+                    if not question_already_saved:
+                        await memory.add_message(
+                            workflow_id=workflow_id,
+                            message_type="ai",
+                            content=next_question,
+                            message_category="clarification_question",
+                        )
+        except Exception as e:
+            print(f"Warning: Failed to save answer message to Neo4j: {e}")
+
     return {
         "status": "accepted",
         "workflow_status": status.status,
@@ -302,7 +430,56 @@ async def get_result(workflow_id: str):
     if not desc.status or desc.status.name != "COMPLETED":
         raise HTTPException(status_code=400, detail="Research not complete yet")
 
-    result: InteractiveResearchResult = await handle.result()
+    result = await handle.result()
+
+    # Handle both dict and InteractiveResearchResult objects
+    if isinstance(result, dict):
+        short_summary = result.get("short_summary", "")
+        markdown_report = result.get("markdown_report", "")
+        image_file_path = result.get("image_file_path")
+        follow_up_questions = result.get("follow_up_questions", [])
+    else:
+        short_summary = result.short_summary
+        markdown_report = result.markdown_report
+        image_file_path = result.image_file_path
+        follow_up_questions = result.follow_up_questions or []
+
+    # Save final research result as a Result node (check if already saved to avoid duplicates)
+    memory = await get_neo4j_memory()
+    if memory:
+        try:
+            print(f"INFO: get_result() called for workflow {workflow_id}")
+            # Check if result already exists
+            existing_results = await memory.get_results(workflow_id)
+            print(
+                f"INFO: Existing results count in get_result(): {len(existing_results)}"
+            )
+            if not existing_results:
+                # Save as a Result node (not a Message node)
+                print(f"INFO: Saving result to Neo4j for workflow {workflow_id}...")
+                await memory.add_result(
+                    workflow_id=workflow_id,
+                    short_summary=short_summary,
+                    markdown_report=markdown_report,
+                    image_file_path=image_file_path,
+                    follow_up_questions=follow_up_questions,
+                )
+                print(
+                    f"INFO: ✅ Research result saved as Result node for conversation {workflow_id} (from get_result endpoint)"
+                )
+            else:
+                print(
+                    f"INFO: Result already exists for conversation {workflow_id}, skipping save"
+                )
+        except Exception as e:
+            print(f"ERROR: Failed to save research result to Neo4j: {e}")
+            import traceback
+
+            traceback.print_exc()
+    else:
+        print(
+            f"WARNING: Neo4j memory not available, cannot save result for {workflow_id}"
+        )
 
     # return {
     #     "workflow_id": workflow_id,
@@ -403,6 +580,27 @@ async def get_conversation(workflow_id: str):
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Failed to get conversation: {str(e)}"
+        )
+
+
+@app.get("/api/conversations/{workflow_id}/messages")
+async def get_conversation_messages(workflow_id: str):
+    """
+    Get all messages for a conversation, ordered by sequence.
+
+    Returns:
+        List of message objects with type, content, timestamp, sequence, etc.
+    """
+    memory = await get_neo4j_memory()
+    if not memory:
+        raise HTTPException(status_code=503, detail="Neo4j memory not available")
+
+    try:
+        messages = await memory.get_messages(workflow_id)
+        return {"messages": [msg.to_dict() for msg in messages]}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get conversation messages: {str(e)}"
         )
 
 
