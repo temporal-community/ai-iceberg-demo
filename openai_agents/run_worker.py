@@ -16,7 +16,9 @@ from temporalio.worker import Worker
 from openai_agents.workflows.image_generation_activity import generate_image
 from openai_agents.workflows.interactive_research_workflow import (
     InteractiveResearchWorkflow,
+    check_knowledge_graph_exact_match,
     process_clarification,
+    search_knowledge_graph,
 )
 from openai_agents.workflows.pdf_generation_activity import generate_pdf
 
@@ -70,6 +72,8 @@ async def main():
             generate_pdf,
             generate_image,
             process_clarification,
+            check_knowledge_graph_exact_match,
+            search_knowledge_graph,
         ],
     )
     await worker.run()

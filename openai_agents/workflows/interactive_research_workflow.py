@@ -36,6 +36,118 @@ class ProcessClarificationResult:
     new_index: int
 
 
+@dataclass
+class KnowledgeGraphExactMatchInput:
+    """Input for knowledge graph exact match activity"""
+
+    query: str
+    min_score: float = 0.8
+
+
+@dataclass
+class KnowledgeGraphExactMatchResult:
+    """Result from knowledge graph exact match activity"""
+
+    found: bool
+    short_summary: str | None = None
+    markdown_report: str | None = None
+    score: float | None = None
+    result_id: str | None = None  # ID of the existing Result node in Neo4j
+    image_file_path: str | None = None  # Image path from existing Result node
+
+
+@dataclass
+class KnowledgeGraphSearchInput:
+    """Input for knowledge graph search activity"""
+
+    query: str
+    limit: int = 3
+    min_score: float = 0.5
+
+
+@dataclass
+class KnowledgeGraphSearchResult:
+    """Result from knowledge graph search activity"""
+
+    context: str
+
+
+@activity.defn
+async def check_knowledge_graph_exact_match(
+    input: KnowledgeGraphExactMatchInput,
+) -> KnowledgeGraphExactMatchResult:
+    """Check if there's an exact match in the knowledge graph"""
+    try:
+        from openai_agents.memory.neo4j_rag import get_neo4j_rag
+
+        activity.logger.info(
+            f"🔍 Checking knowledge graph for exact match (>= {input.min_score}) for query: '{input.query[:50]}...'"
+        )
+        rag = await get_neo4j_rag()
+        if not rag:
+            activity.logger.warning("⚠️ Neo4j RAG not available")
+            return KnowledgeGraphExactMatchResult(found=False)
+
+        match = await rag.get_best_match(input.query, min_score=input.min_score)
+        if match:
+            node_dict, score = match
+            result_id = node_dict.get("result_id")
+            image_file_path = node_dict.get("image_file_path")
+            activity.logger.info(
+                f"🎯 Found high similarity match (score: {score:.2f}) in knowledge graph! Result ID: {result_id}, Image: {image_file_path}"
+            )
+            return KnowledgeGraphExactMatchResult(
+                found=True,
+                short_summary=node_dict.get("short_summary", ""),
+                markdown_report=node_dict.get("markdown_report", ""),
+                score=score,
+                result_id=result_id,
+                image_file_path=image_file_path,
+            )
+        else:
+            activity.logger.info(
+                f"❌ No exact match found (similarity < {input.min_score})"
+            )
+            return KnowledgeGraphExactMatchResult(found=False)
+    except Exception as e:
+        activity.logger.error(f"❌ Knowledge graph exact match check failed: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return KnowledgeGraphExactMatchResult(found=False)
+
+
+@activity.defn
+async def search_knowledge_graph(
+    input: KnowledgeGraphSearchInput,
+) -> KnowledgeGraphSearchResult:
+    """Search knowledge graph for relevant context"""
+    try:
+        from openai_agents.memory.neo4j_rag import get_neo4j_rag
+
+        activity.logger.info(
+            f"🔍 Searching knowledge graph for context (min_score: {input.min_score}) for query: '{input.query[:50]}...'"
+        )
+        rag = await get_neo4j_rag()
+        if not rag:
+            activity.logger.warning("⚠️ Neo4j RAG not available")
+            return KnowledgeGraphSearchResult(context="")
+
+        context = await rag.get_relevant_context(
+            input.query, limit=input.limit, min_score=input.min_score
+        )
+        activity.logger.info(
+            f"✅ Retrieved {len(context)} characters of context from knowledge graph"
+        )
+        return KnowledgeGraphSearchResult(context=context)
+    except Exception as e:
+        activity.logger.error(f"❌ Knowledge graph search failed: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return KnowledgeGraphSearchResult(context="")
+
+
 @activity.defn
 async def process_clarification(
     input: ProcessClarificationInput,
@@ -74,6 +186,9 @@ class InteractiveResearchResult:
     markdown_report: str
     follow_up_questions: list[str]
     image_file_path: str | None = None
+    existing_result_id: str | None = (
+        None  # ID of existing Result node if reused from knowledge graph
+    )
 
 
 @workflow.defn
@@ -96,6 +211,7 @@ class InteractiveResearchWorkflow:
         report: str,
         questions: list[str] | None = None,
         image_path: str | None = None,
+        existing_result_id: str | None = None,
     ) -> InteractiveResearchResult:
         """Helper to build InteractiveResearchResult"""
         return InteractiveResearchResult(
@@ -103,6 +219,7 @@ class InteractiveResearchWorkflow:
             markdown_report=report,
             follow_up_questions=questions or [],
             image_file_path=image_path,
+            existing_result_id=existing_result_id,
         )
 
     @workflow.run
@@ -119,11 +236,17 @@ class InteractiveResearchWorkflow:
         if initial_query and not use_clarifications:
             # Simple direct research mode - backward compatibility
             report_data = await self.research_manager._run_direct(initial_query)
+            # Use existing image path if we reused a result, otherwise use newly generated image
+            image_path = (
+                self.research_manager.existing_image_path
+                or self.research_manager.research_image_path
+            )
             return self._build_result(
                 report_data.short_summary,
                 report_data.markdown_report,
                 report_data.follow_up_questions,
-                self.research_manager.research_image_path,
+                image_path,
+                self.research_manager.existing_result_id,
             )
 
         # Main workflow loop - wait for research to be started and completed
@@ -140,16 +263,29 @@ class InteractiveResearchWorkflow:
             # If workflow was signaled to end, exit gracefully
             if self.workflow_ended:
                 return self._build_result(
-                    "Research ended by user", "Research workflow ended by user"
+                    "Research ended by user",
+                    "Research workflow ended by user",
+                    None,
+                    None,
+                    None,
                 )
 
             # If research has been completed, return results
             if self.research_completed and self.report_data:
+                # Use existing image path if we reused a result, otherwise use newly generated image
+                image_path = (
+                    self.research_manager.existing_image_path
+                    or self.research_manager.research_image_path
+                )
+                workflow.logger.info(
+                    f"Building result with image_path: {image_path}, existing_result_id: {self.research_manager.existing_result_id}"
+                )
                 return self._build_result(
                     self.report_data.short_summary,
                     self.report_data.markdown_report,
                     self.report_data.follow_up_questions,
-                    self.research_manager.research_image_path,
+                    image_path,
+                    self.research_manager.existing_result_id,
                 )
 
             # If research is initialized but not completed, handle the clarification flow
@@ -165,7 +301,11 @@ class InteractiveResearchWorkflow:
 
                     if self.workflow_ended:
                         return self._build_result(
-                            "Research ended by user", "Research workflow ended by user"
+                            "Research ended by user",
+                            "Research workflow ended by user",
+                            None,
+                            None,
+                            None,
                         )
 
                     # Complete research with clarifications

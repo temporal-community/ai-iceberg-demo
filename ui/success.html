@@ -179,7 +179,14 @@
                 }
 
                 if (result.image_file_path) {
-                    reportImage.src = result.image_file_path;
+                    // Ensure path starts with / for proper URL resolution
+                    const imgPath = result.image_file_path.startsWith('/')
+                        ? result.image_file_path
+                        : `/${result.image_file_path}`;
+                    console.log('Setting image src to:', imgPath);
+                    reportImage.src = imgPath;
+                } else {
+                    console.log('No image_file_path in result:', result);
                 }
 
                 // Setup download button
