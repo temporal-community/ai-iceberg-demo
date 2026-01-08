@@ -102,8 +102,8 @@ class ResultNode:
         markdown_report: str,
         timestamp: datetime,
         sequence: int,
+        title: Optional[str] = None,
         image_file_path: Optional[str] = None,
-        follow_up_questions: Optional[List[str]] = None,
     ):
         self.result_id = result_id
         self.workflow_id = workflow_id
@@ -111,8 +111,8 @@ class ResultNode:
         self.markdown_report = markdown_report
         self.timestamp = timestamp
         self.sequence = sequence
+        self.title = title
         self.image_file_path = image_file_path
-        self.follow_up_questions = follow_up_questions or []
 
     def to_dict(self) -> dict:
         """Convert to dictionary for API responses"""
@@ -123,8 +123,8 @@ class ResultNode:
             "markdown_report": self.markdown_report,
             "timestamp": self.timestamp.isoformat(),
             "sequence": self.sequence,
+            "title": self.title,
             "image_file_path": self.image_file_path,
-            "follow_up_questions": self.follow_up_questions,
         }
 
 
@@ -430,8 +430,8 @@ class Neo4jMemory:
         workflow_id: str,
         short_summary: str,
         markdown_report: str,
+        title: Optional[str] = None,
         image_file_path: Optional[str] = None,
-        follow_up_questions: Optional[List[str]] = None,
     ) -> ResultNode:
         """
         Add a research result to a conversation.
@@ -440,8 +440,8 @@ class Neo4jMemory:
             workflow_id: Temporal workflow ID
             short_summary: Brief summary of the research findings
             markdown_report: Full markdown research report
+            title: Optional title extracted from markdown H1
             image_file_path: Optional path to generated image
-            follow_up_questions: Optional list of suggested follow-up questions
 
         Returns:
             ResultNode representing the created result
@@ -501,8 +501,8 @@ class Neo4jMemory:
                         markdown_report: $markdown_report,
                         timestamp: $timestamp,
                         sequence: $sequence,
-                        image_file_path: $image_file_path,
-                        follow_up_questions: $follow_up_questions
+                        title: $title,
+                        image_file_path: $image_file_path
                     })
                     CREATE (c)-[:HAS_RESULT]->(r)
                     CREATE (prev)-[:NEXT]->(r)
@@ -514,8 +514,8 @@ class Neo4jMemory:
                     markdown_report=markdown_report,
                     timestamp=timestamp,
                     sequence=next_sequence,
+                    title=title,
                     image_file_path=image_file_path,
-                    follow_up_questions=follow_up_questions or [],
                     last_node_id=last_node_id,
                 )
             else:
@@ -530,8 +530,8 @@ class Neo4jMemory:
                         markdown_report: $markdown_report,
                         timestamp: $timestamp,
                         sequence: $sequence,
-                        image_file_path: $image_file_path,
-                        follow_up_questions: $follow_up_questions
+                        title: $title,
+                        image_file_path: $image_file_path
                     })
                     CREATE (c)-[:HAS_RESULT]->(r)
                     RETURN r
@@ -542,8 +542,8 @@ class Neo4jMemory:
                     markdown_report=markdown_report,
                     timestamp=timestamp,
                     sequence=next_sequence,
+                    title=title,
                     image_file_path=image_file_path,
-                    follow_up_questions=follow_up_questions or [],
                 )
 
             record = await result.single()
@@ -560,8 +560,8 @@ class Neo4jMemory:
                     markdown_report=node["markdown_report"],
                     timestamp=node["timestamp"],
                     sequence=node["sequence"],
+                    title=node.get("title"),
                     image_file_path=node.get("image_file_path"),
-                    follow_up_questions=node.get("follow_up_questions", []),
                 )
             print(f"ERROR: Failed to create result node - no record returned")
             raise Exception("Failed to create result node")
@@ -624,8 +624,8 @@ class Neo4jMemory:
                             markdown_report=node["markdown_report"],
                             timestamp=node["timestamp"],
                             sequence=node["sequence"],
+                            title=node.get("title"),
                             image_file_path=node.get("image_file_path"),
-                            follow_up_questions=node.get("follow_up_questions", []),
                         )
                     )
             return items
@@ -669,8 +669,8 @@ class Neo4jMemory:
                         markdown_report=node["markdown_report"],
                         timestamp=node["timestamp"],
                         sequence=node["sequence"],
+                        title=node.get("title"),
                         image_file_path=node.get("image_file_path"),
-                        follow_up_questions=node.get("follow_up_questions", []),
                     )
                 )
             return results

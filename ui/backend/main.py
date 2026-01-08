@@ -45,6 +45,30 @@ load_dotenv()
 TEMPORAL_TASK_QUEUE = os.getenv("TEMPORAL_TASK_QUEUE", "research-queue")
 
 
+def extract_h1_from_markdown(markdown: str) -> Optional[str]:
+    """
+    Extract the first H1 heading (# Title) from markdown text.
+
+    Args:
+        markdown: Markdown text to parse
+
+    Returns:
+        The H1 title text (without the #), or None if no H1 found
+    """
+    if not markdown:
+        return None
+
+    lines = markdown.strip().split("\n")
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("# ") and not stripped.startswith("##"):
+            # Found H1 (starts with "# " but not "##")
+            title = stripped[2:].strip()  # Remove "# " prefix
+            return title if title else None
+
+    return None
+
+
 # ============================================
 # FastAPI App Setup
 # ============================================
@@ -295,12 +319,15 @@ async def get_status(workflow_id: str):
                             print(
                                 f"INFO: Got result, short_summary length: {len(short_summary)}, markdown length: {len(markdown_report)}"
                             )
+                            # Extract title from H1 in markdown
+                            title = extract_h1_from_markdown(markdown_report)
+                            print(f"INFO: Extracted title from markdown: {title}")
                             await memory.add_result(
                                 workflow_id=workflow_id,
                                 short_summary=short_summary,
                                 markdown_report=markdown_report,
+                                title=title,
                                 image_file_path=image_file_path,
-                                follow_up_questions=follow_up_questions,
                             )
                             print(
                                 f"INFO: ✅ Research result saved as Result node for conversation {workflow_id} (from status check)"
@@ -457,12 +484,15 @@ async def get_result(workflow_id: str):
             if not existing_results:
                 # Save as a Result node (not a Message node)
                 print(f"INFO: Saving result to Neo4j for workflow {workflow_id}...")
+                # Extract title from H1 in markdown
+                title = extract_h1_from_markdown(markdown_report)
+                print(f"INFO: Extracted title from markdown: {title}")
                 await memory.add_result(
                     workflow_id=workflow_id,
                     short_summary=short_summary,
                     markdown_report=markdown_report,
+                    title=title,
                     image_file_path=image_file_path,
-                    follow_up_questions=follow_up_questions,
                 )
                 print(
                     f"INFO: ✅ Research result saved as Result node for conversation {workflow_id} (from get_result endpoint)"
