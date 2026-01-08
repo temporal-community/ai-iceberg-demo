@@ -2,156 +2,175 @@
 // Handles communication with FastAPI backend
 
 class ResearchClient {
-    constructor(baseUrl = 'http://localhost:8233') {
-        this.baseUrl = baseUrl;
-        this.workflowId = null;
-        this.eventSource = null;
+  constructor(baseUrl = "http://localhost:8233") {
+    this.baseUrl = baseUrl;
+    this.workflowId = null;
+    this.eventSource = null;
+  }
+
+  async startResearch(query) {
+    const response = await fetch(`${this.baseUrl}/api/start-research`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query }),
+    });
+
+    if (!response.ok) {
+      throw new Error("Failed to start research");
     }
 
-    async startResearch(query) {
-        const response = await fetch(`${this.baseUrl}/api/start-research`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ query })
-        });
+    const data = await response.json();
+    this.workflowId = data.workflow_id;
+    return data;
+  }
 
-        if (!response.ok) {
-            throw new Error('Failed to start research');
-        }
-
-        const data = await response.json();
-        this.workflowId = data.workflow_id;
-        return data;
+  async getStatus(workflowId = null) {
+    const id = workflowId || this.workflowId;
+    if (!id) {
+      throw new Error("No workflow ID available");
     }
 
-    async getStatus(workflowId = null) {
-        const id = workflowId || this.workflowId;
-        if (!id) {
-            throw new Error('No workflow ID available');
-        }
+    const response = await fetch(`${this.baseUrl}/api/status/${id}`);
 
-        const response = await fetch(`${this.baseUrl}/api/status/${id}`);
-        
-        if (!response.ok) {
-            throw new Error('Failed to get status');
-        }
-
-        return await response.json();
+    if (!response.ok) {
+      throw new Error("Failed to get status");
     }
 
-    async submitAnswer(answer, workflowId = null, currentQuestionIndex = 0) {
-        const id = workflowId || this.workflowId;
-        if (!id) {
-            throw new Error('No workflow ID available');
-        }
+    return await response.json();
+  }
 
-        const response = await fetch(`${this.baseUrl}/api/answer/${id}/${currentQuestionIndex}`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ answer })
-        });
-
-        if (!response.ok) {
-            throw new Error('Failed to submit answer');
-        }
-
-        return await response.json();
+  async submitAnswer(answer, workflowId = null, currentQuestionIndex = 0) {
+    const id = workflowId || this.workflowId;
+    if (!id) {
+      throw new Error("No workflow ID available");
     }
 
-    async getResult(workflowId = null) {
-        const id = workflowId || this.workflowId;
-        if (!id) {
-            throw new Error('No workflow ID available');
-        }
+    const response = await fetch(
+      `${this.baseUrl}/api/answer/${id}/${currentQuestionIndex}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ answer }),
+      },
+    );
 
-        const response = await fetch(`${this.baseUrl}/api/result/${id}`);
-
-        if (!response.ok) {
-            throw new Error('Result not ready or failed');
-        }
-
-        return await response.json();
+    if (!response.ok) {
+      throw new Error("Failed to submit answer");
     }
 
-    async listConversations(limit = 50, offset = 0) {
-        const response = await fetch(`${this.baseUrl}/api/conversations?limit=${limit}&offset=${offset}`);
+    return await response.json();
+  }
 
-        if (!response.ok) {
-            throw new Error('Failed to list conversations');
+  async getResult(workflowId = null) {
+    const id = workflowId || this.workflowId;
+    if (!id) {
+      throw new Error("No workflow ID available");
+    }
+
+    const response = await fetch(`${this.baseUrl}/api/result/${id}`);
+
+    if (!response.ok) {
+      throw new Error("Result not ready or failed");
+    }
+
+    return await response.json();
+  }
+
+  async listConversations(limit = 50, offset = 0) {
+    const response = await fetch(
+      `${this.baseUrl}/api/conversations?limit=${limit}&offset=${offset}`,
+    );
+
+    if (!response.ok) {
+      throw new Error("Failed to list conversations");
+    }
+
+    return await response.json();
+  }
+
+  async getConversation(workflowId) {
+    const response = await fetch(
+      `${this.baseUrl}/api/conversations/${workflowId}`,
+    );
+
+    if (!response.ok) {
+      throw new Error("Failed to get conversation");
+    }
+
+    return await response.json();
+  }
+
+  async getConversationMessages(workflowId) {
+    const response = await fetch(
+      `${this.baseUrl}/api/conversations/${workflowId}/messages`,
+    );
+
+    if (!response.ok) {
+      throw new Error("Failed to get conversation messages");
+    }
+
+    return await response.json();
+  }
+
+  // Server-Sent Events for live updates
+  streamStatus(workflowId, onUpdate, onComplete, onError) {
+    const id = workflowId || this.workflowId;
+    if (!id) {
+      throw new Error("No workflow ID available");
+    }
+
+    this.eventSource = new EventSource(`${this.baseUrl}/api/stream/${id}`);
+
+    this.eventSource.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      onUpdate(data);
+
+      if (data.status === "complete") {
+        this.closeStream();
+        if (onComplete) onComplete(data);
+      }
+    };
+
+    this.eventSource.onerror = (error) => {
+      console.error("Stream error:", error);
+      this.closeStream();
+      if (onError) onError(error);
+    };
+  }
+
+  closeStream() {
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
+    }
+  }
+
+  // Polling alternative (if SSE not preferred)
+  async pollStatus(workflowId, onUpdate, interval = 2000) {
+    const id = workflowId || this.workflowId;
+
+    const poll = async () => {
+      try {
+        const status = await this.getStatus(id);
+        onUpdate(status);
+
+        if (status.status !== "complete" && status.status !== "failed") {
+          setTimeout(poll, interval);
         }
+      } catch (error) {
+        console.error("Polling error:", error);
+      }
+    };
 
-        return await response.json();
-    }
-
-    async getConversation(workflowId) {
-        const response = await fetch(`${this.baseUrl}/api/conversations/${workflowId}`);
-
-        if (!response.ok) {
-            throw new Error('Failed to get conversation');
-        }
-
-        return await response.json();
-    }
-
-    // Server-Sent Events for live updates
-    streamStatus(workflowId, onUpdate, onComplete, onError) {
-        const id = workflowId || this.workflowId;
-        if (!id) {
-            throw new Error('No workflow ID available');
-        }
-
-        this.eventSource = new EventSource(`${this.baseUrl}/api/stream/${id}`);
-
-        this.eventSource.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            onUpdate(data);
-
-            if (data.status === 'complete') {
-                this.closeStream();
-                if (onComplete) onComplete(data);
-            }
-        };
-
-        this.eventSource.onerror = (error) => {
-            console.error('Stream error:', error);
-            this.closeStream();
-            if (onError) onError(error);
-        };
-    }
-
-    closeStream() {
-        if (this.eventSource) {
-            this.eventSource.close();
-            this.eventSource = null;
-        }
-    }
-
-    // Polling alternative (if SSE not preferred)
-    async pollStatus(workflowId, onUpdate, interval = 2000) {
-        const id = workflowId || this.workflowId;
-        
-        const poll = async () => {
-            try {
-                const status = await this.getStatus(id);
-                onUpdate(status);
-
-                if (status.status !== 'complete' && status.status !== 'failed') {
-                    setTimeout(poll, interval);
-                }
-            } catch (error) {
-                console.error('Polling error:', error);
-            }
-        };
-
-        poll();
-    }
+    poll();
+  }
 }
 
 // Export for use in HTML
-if (typeof window !== 'undefined') {
-    window.ResearchClient = ResearchClient;
+if (typeof window !== "undefined") {
+  window.ResearchClient = ResearchClient;
 }

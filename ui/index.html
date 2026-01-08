@@ -348,29 +348,49 @@
                 // Clear current chat
                 chatContainer.innerHTML = '';
 
-                // Get conversation details
+                // Get conversation details and messages
                 const conversation = await client.getConversation(id);
-                addMessage(`Resuming conversation: "${conversation.original_query}"`, false);
+                const messagesResponse = await client.getConversationMessages(id);
+                const messages = messagesResponse.messages || [];
+
+                // Restore full conversation history from messages and results
+                if (messages.length > 0) {
+                    messages.forEach(item => {
+                        if (item.message_type) {
+                            // It's a Message node
+                            const isUser = item.message_type === 'human';
+                            addMessage(item.content, isUser);
+                        } else if (item.short_summary) {
+                            // It's a Result node
+                            addMessage(item.short_summary, false);
+                            // Note: Full markdown report and image are available in item.markdown_report and item.image_file_path
+                        }
+                    });
+                } else {
+                    // Fallback: if no messages, show original query
+                    addMessage(conversation.original_query, true);
+                }
 
                 // Get current status
                 const status = await client.getStatus(id);
                 currentQuestionIndex = status.current_question_index;
 
-                // Add original query
-                if (status.original_query) {
-                    addMessage(status.original_query, true);
-                }
-
-                // Show current state
+                // Show current state if conversation is still active
                 if (status.status === 'awaiting_clarifications' && status.current_question) {
-                    addMessage(status.current_question);
+                    // Check if we already displayed this question
+                    const lastItem = messages[messages.length - 1];
+                    const lastContent = lastItem?.content || lastItem?.short_summary;
+                    if (!lastItem || lastContent !== status.current_question) {
+                        addMessage(status.current_question);
+                    }
                 } else if (status.status === 'researching') {
                     showSpinner(true);
                     pollStatus();
                 } else if (status.status === 'completed') {
                     addMessage('This conversation is complete. Starting a new one...');
                     clearWorkflowId();
-                } else {
+                } else if (messages.length === 0) {
+                    // No messages and not in a specific state
                     addMessage('Ready to continue. What would you like to do?');
                 }
             } catch (error) {
