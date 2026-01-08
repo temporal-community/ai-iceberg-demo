@@ -151,8 +151,11 @@
         const savedWorkflowId = localStorage.getItem('workflowId');
         if (savedWorkflowId) {
             workflowId = savedWorkflowId;
-            // Try to resume the conversation
-            resumeConversation(savedWorkflowId);
+            // Try to resume the conversation, but don't show error if it fails
+            resumeConversation(savedWorkflowId).catch(() => {
+                // If resume fails, just clear the saved ID and show welcome message
+                clearWorkflowId();
+            });
         }
 
         // Load conversation history on page load
@@ -395,8 +398,15 @@
                 }
             } catch (error) {
                 console.error('Failed to resume conversation:', error);
-                addMessage('Failed to resume conversation. Please start a new one.');
+                // Restore the original welcome message instead of showing error
                 clearWorkflowId();
+                chatContainer.innerHTML = `
+                    <div class="message bot">
+                        <div class="message-bubble bot">
+                            Hey there, what would you like to research?
+                        </div>
+                    </div>
+                `;
             }
         }
 

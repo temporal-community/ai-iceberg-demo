@@ -116,6 +116,11 @@ class ResultNode:
 
     def to_dict(self) -> dict:
         """Convert to dictionary for API responses"""
+        # Normalize image_file_path to ensure it starts with / for web serving
+        img_path = self.image_file_path
+        if img_path and not img_path.startswith("/"):
+            img_path = f"/{img_path}"
+
         return {
             "result_id": self.result_id,
             "workflow_id": self.workflow_id,
@@ -124,7 +129,7 @@ class ResultNode:
             "timestamp": self.timestamp.isoformat(),
             "sequence": self.sequence,
             "title": self.title,
-            "image_file_path": self.image_file_path,
+            "image_file_path": img_path,
         }
 
 
@@ -565,6 +570,122 @@ class Neo4jMemory:
                 )
             print(f"ERROR: Failed to create result node - no record returned")
             raise Exception("Failed to create result node")
+
+    async def link_existing_result(
+        self,
+        workflow_id: str,
+        existing_result_id: str,
+    ) -> ResultNode:
+        """
+        Link an existing Result node to a conversation instead of creating a new one.
+        This is used when we reuse a Result from the knowledge graph (e.g., 80% similarity match).
+
+        Args:
+            workflow_id: Temporal workflow ID
+            existing_result_id: ID of the existing Result node to link
+
+        Returns:
+            ResultNode representing the linked result
+        """
+        async with self.driver.session() as session:
+            # First, get the existing Result node
+            result = await session.run(
+                """
+                MATCH (r:Result {result_id: $existing_result_id})
+                RETURN r
+                """,
+                existing_result_id=existing_result_id,
+            )
+            record = await result.single()
+            if not record:
+                raise Exception(f"Result node with ID {existing_result_id} not found")
+
+            existing_node = record["r"]
+
+            # Check if this Result is already linked to this conversation
+            check_result = await session.run(
+                """
+                MATCH (c:Conversation {workflow_id: $workflow_id})-[:HAS_RESULT]->(r:Result {result_id: $existing_result_id})
+                RETURN r
+                """,
+                workflow_id=workflow_id,
+                existing_result_id=existing_result_id,
+            )
+            if await check_result.single():
+                print(
+                    f"INFO: Result {existing_result_id} already linked to conversation {workflow_id}"
+                )
+                return ResultNode(
+                    result_id=existing_node["result_id"],
+                    workflow_id=existing_node["workflow_id"],
+                    short_summary=existing_node["short_summary"],
+                    markdown_report=existing_node["markdown_report"],
+                    timestamp=existing_node["timestamp"],
+                    sequence=existing_node.get("sequence", 0),
+                    title=existing_node.get("title"),
+                    image_file_path=existing_node.get("image_file_path"),
+                )
+
+            # Get the last node in the conversation to link from
+            last_node_result = await session.run(
+                """
+                MATCH (c:Conversation {workflow_id: $workflow_id})-[:HAS_MESSAGE|HAS_RESULT]->(n)
+                RETURN n
+                ORDER BY n.sequence DESC
+                LIMIT 1
+                """,
+                workflow_id=workflow_id,
+            )
+            last_node_record = await last_node_result.single()
+
+            # Link the existing Result to the conversation
+            if last_node_record:
+                last_node = last_node_record["n"]
+                last_node_id = last_node.element_id
+                link_result = await session.run(
+                    """
+                    MATCH (c:Conversation {workflow_id: $workflow_id})
+                    MATCH (r:Result {result_id: $existing_result_id})
+                    MATCH (prev)
+                    WHERE elementId(prev) = $last_node_id
+                    CREATE (c)-[:HAS_RESULT]->(r)
+                    CREATE (prev)-[:NEXT]->(r)
+                    RETURN r
+                    """,
+                    workflow_id=workflow_id,
+                    existing_result_id=existing_result_id,
+                    last_node_id=last_node_id,
+                )
+            else:
+                # First node in conversation (unlikely for a result, but handle it)
+                link_result = await session.run(
+                    """
+                    MATCH (c:Conversation {workflow_id: $workflow_id})
+                    MATCH (r:Result {result_id: $existing_result_id})
+                    CREATE (c)-[:HAS_RESULT]->(r)
+                    RETURN r
+                    """,
+                    workflow_id=workflow_id,
+                    existing_result_id=existing_result_id,
+                )
+
+            link_record = await link_result.single()
+            if link_record:
+                node = link_record["r"]
+                print(
+                    f"INFO: ✅ Linked existing Result node {existing_result_id} to conversation {workflow_id}"
+                )
+                return ResultNode(
+                    result_id=node["result_id"],
+                    workflow_id=node["workflow_id"],
+                    short_summary=node["short_summary"],
+                    markdown_report=node["markdown_report"],
+                    timestamp=node["timestamp"],
+                    sequence=node.get("sequence", 0),
+                    title=node.get("title"),
+                    image_file_path=node.get("image_file_path"),
+                )
+            raise Exception("Failed to link existing result node")
 
     async def get_messages(self, workflow_id: str, limit: Optional[int] = None) -> List:
         """

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -70,6 +71,12 @@ class InteractiveResearchManager:
         # Image state (stored during generation for PDF embedding)
         self.research_image_path: str | None = None
         self.research_image_description: str | None = None
+        self.existing_result_id: str | None = (
+            None  # ID of existing Result node if reused from knowledge graph
+        )
+        self.existing_image_path: str | None = (
+            None  # Image path from existing Result node if reused
+        )
 
     async def run(self, query: str, use_clarifications: bool = False) -> str:
         """
@@ -97,10 +104,28 @@ class InteractiveResearchManager:
             )
             image_task = asyncio.create_task(self._generate_research_image(query))
 
-            # Perform research pipeline (planning, searching, writing)
+            # FIRST: Check knowledge graph for exact match (similarity >= 0.8)
+            exact_match = await self._check_knowledge_graph_for_exact_match(query)
+            if exact_match:
+                workflow.logger.info(
+                    "Found exact match in knowledge graph, returning prior result"
+                )
+                return exact_match
+
+            # SECOND: Search knowledge graph for context (similarity >= 0.5)
+            kg_context = await self._search_knowledge_graph(query)
+
+            # THIRD: Perform research pipeline (planning, searching, writing)
             search_plan = await self._plan_searches(query)
             search_results = await self._perform_searches(search_plan)
-            report = await self._write_report(query, search_results)
+
+            # Combine knowledge graph context with web search results
+            all_results = []
+            if kg_context:
+                all_results.append(f"Knowledge Graph Context:\n{kg_context}")
+            all_results.extend(search_results)
+
+            report = await self._write_report(query, all_results)
 
             # Wait for image generation to complete (if not already done)
             workflow.logger.info("Waiting for image generation to complete")
@@ -116,7 +141,23 @@ class InteractiveResearchManager:
         """Start clarification flow and return whether clarifications are needed"""
         trace_id = gen_trace_id()
         with trace("Clarification check", trace_id=trace_id):
-            # Start with triage agent to determine if clarifications are needed
+            # FIRST: Check knowledge graph for exact match (similarity >= 0.8)
+            # If found, return it directly without clarifications or new research
+            exact_match = await self._check_knowledge_graph_for_exact_match(query)
+            if exact_match:
+                workflow.logger.info(
+                    "Found exact match in knowledge graph, returning prior result"
+                )
+                return ClarificationResult(
+                    needs_clarifications=False,
+                    report_data=exact_match,
+                )
+
+            # SECOND: Check knowledge graph for context (similarity >= 0.5)
+            # This will be used as context if we proceed with research
+            kg_context = await self._search_knowledge_graph(query)
+
+            # THIRD: Start with triage agent to determine if clarifications are needed
             input_items: list[TResponseInputItem] = [{"content": query, "role": "user"}]
             result = await Runner.run(
                 self.triage_agent,
@@ -138,10 +179,18 @@ class InteractiveResearchManager:
                 )
                 image_task = asyncio.create_task(self._generate_research_image(query))
 
+                # Use knowledge graph context if available (already fetched above)
                 # Perform research pipeline (planning, searching, writing)
                 search_plan = await self._plan_searches(query)
                 search_results = await self._perform_searches(search_plan)
-                report = await self._write_report(query, search_results)
+
+                # Combine knowledge graph context with web search results
+                all_results = []
+                if kg_context:
+                    all_results.append(f"Knowledge Graph Context:\n{kg_context}")
+                all_results.extend(search_results)
+
+                report = await self._write_report(query, all_results)
 
                 # Wait for image generation to complete (if not already done)
                 workflow.logger.info("Waiting for image generation to complete")
@@ -166,6 +215,16 @@ class InteractiveResearchManager:
             # Enrich the query with clarification responses
             enriched_query = self._enrich_query(original_query, questions, responses)
 
+            # FIRST: Check knowledge graph for exact match with enriched query (similarity >= 0.8)
+            exact_match = await self._check_knowledge_graph_for_exact_match(
+                enriched_query
+            )
+            if exact_match:
+                workflow.logger.info(
+                    "Found exact match in knowledge graph after clarifications, returning prior result"
+                )
+                return exact_match
+
             # Start image generation immediately to run in parallel with entire research pipeline
             workflow.logger.info(
                 "Starting image generation in parallel with research pipeline"
@@ -174,10 +233,20 @@ class InteractiveResearchManager:
                 self._generate_research_image(enriched_query)
             )
 
-            # Perform research pipeline (planning, searching, writing)
+            # SECOND: Search knowledge graph for context (similarity >= 0.5)
+            kg_context = await self._search_knowledge_graph(enriched_query)
+
+            # THIRD: Perform research pipeline (planning, searching, writing)
             search_plan = await self._plan_searches(enriched_query)
             search_results = await self._perform_searches(search_plan)
-            report = await self._write_report(enriched_query, search_results)
+
+            # Combine knowledge graph context with web search results
+            all_results = []
+            if kg_context:
+                all_results.append(f"Knowledge Graph Context:\n{kg_context}")
+            all_results.extend(search_results)
+
+            report = await self._write_report(enriched_query, all_results)
 
             # Wait for image generation to complete (if not already done)
             workflow.logger.info("Waiting for image generation to complete")
@@ -230,6 +299,111 @@ class InteractiveResearchManager:
             answer = responses.get(f"question_{i}", "No specific preference")
             enriched += f"- {question}: {answer}\n"
         return enriched
+
+    async def _check_knowledge_graph_for_exact_match(
+        self, query: str
+    ) -> Optional[ReportData]:
+        """
+        Check if there's an exact match (similarity >= 0.8) in the knowledge graph.
+        If found, return the prior Result as a ReportData.
+
+        Args:
+            query: Research query
+
+        Returns:
+            ReportData if high similarity match found, None otherwise
+        """
+        try:
+            # Import activity types here to avoid circular imports
+            from openai_agents.workflows.interactive_research_workflow import (
+                check_knowledge_graph_exact_match,
+                KnowledgeGraphExactMatchInput,
+            )
+
+            workflow.logger.info(
+                f"🔍 Attempting to check knowledge graph for exact match (>=0.8) for query: '{query}'"
+            )
+
+            # Call activity instead of direct import
+            result = await workflow.execute_activity(
+                check_knowledge_graph_exact_match,
+                KnowledgeGraphExactMatchInput(query=query, min_score=0.8),
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+
+            if result.found:
+                workflow.logger.info(
+                    f"🎯 Found high similarity match (score: {result.score:.2f}) in knowledge graph!"
+                )
+                workflow.logger.info(
+                    f"   Result ID: {result.result_id}, Image path: {result.image_file_path}"
+                )
+
+                # Store the existing result_id and image_path for later use
+                self.existing_result_id = result.result_id
+                self.existing_image_path = result.image_file_path
+                workflow.logger.info(
+                    f"   Stored existing_image_path: {self.existing_image_path}"
+                )
+
+                # Convert Result to ReportData
+                return ReportData(
+                    short_summary=result.short_summary or "",
+                    markdown_report=result.markdown_report or "",
+                    follow_up_questions=[],
+                )
+            else:
+                workflow.logger.info(f"❌ No exact match found (similarity < 0.8)")
+            return None
+        except Exception as e:
+            workflow.logger.error(f"❌ Knowledge graph exact match check failed: {e}")
+            import traceback
+
+            traceback.print_exc()
+            return None
+
+    async def _search_knowledge_graph(self, query: str) -> str | None:
+        """
+        Search the Neo4j knowledge graph for relevant information (similarity >= 0.5).
+
+        Args:
+            query: Research query
+
+        Returns:
+            Context string from knowledge graph, or None if unavailable
+        """
+        try:
+            # Import activity types here to avoid circular imports
+            from openai_agents.workflows.interactive_research_workflow import (
+                search_knowledge_graph,
+                KnowledgeGraphSearchInput,
+            )
+
+            workflow.logger.info(
+                f"Searching knowledge graph for context (>=0.5) for query: {query[:50]}..."
+            )
+
+            # Call activity instead of direct import
+            result = await workflow.execute_activity(
+                search_knowledge_graph,
+                KnowledgeGraphSearchInput(query=query, limit=3, min_score=0.5),
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+
+            if result.context and result.context.strip():
+                workflow.logger.info(
+                    f"Found knowledge graph context for query: {query[:50]}..."
+                )
+                return result.context
+            else:
+                workflow.logger.info("No relevant context found in knowledge graph")
+            return None
+        except Exception as e:
+            workflow.logger.warning(f"Knowledge graph search failed: {e}")
+            import traceback
+
+            traceback.print_exc()
+            return None
 
     async def _plan_searches(self, query: str) -> WebSearchPlan:
         input_str: str = f"Query: {query}"

@@ -177,9 +177,12 @@ static_path = Path(__file__).parent.parent
 if static_path.exists():
     app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
-images_path = Path(__file__).resolve().parent.parent.parent / "temp_images"
-images_path.mkdir(exist_ok=True)
-app.mount("/temp_images", StaticFiles(directory=str(images_path)), name="images")
+# Serve temporary images
+temp_images_path = Path(__file__).resolve().parent.parent.parent / "temp_images"
+temp_images_path.mkdir(exist_ok=True)
+app.mount(
+    "/temp_images", StaticFiles(directory=str(temp_images_path)), name="temp_images"
+)
 
 # ============================================
 # API Endpoints
@@ -311,27 +314,69 @@ async def get_status(workflow_id: str):
                                 follow_up_questions = result.get(
                                     "follow_up_questions", []
                                 )
+                                existing_result_id = result.get("existing_result_id")
                             else:
                                 short_summary = result.short_summary
                                 markdown_report = result.markdown_report
                                 image_file_path = result.image_file_path
                                 follow_up_questions = result.follow_up_questions or []
+                                existing_result_id = getattr(
+                                    result, "existing_result_id", None
+                                )
+
+                            # Normalize image_file_path to ensure it starts with / for web serving
+                            if image_file_path and not image_file_path.startswith("/"):
+                                image_file_path = f"/{image_file_path}"
                             print(
                                 f"INFO: Got result, short_summary length: {len(short_summary)}, markdown length: {len(markdown_report)}"
                             )
-                            # Extract title from H1 in markdown
-                            title = extract_h1_from_markdown(markdown_report)
-                            print(f"INFO: Extracted title from markdown: {title}")
-                            await memory.add_result(
-                                workflow_id=workflow_id,
-                                short_summary=short_summary,
-                                markdown_report=markdown_report,
-                                title=title,
-                                image_file_path=image_file_path,
-                            )
-                            print(
-                                f"INFO: ✅ Research result saved as Result node for conversation {workflow_id} (from status check)"
-                            )
+
+                            # Check if this is a reused result from knowledge graph
+                            if existing_result_id:
+                                print(
+                                    f"INFO: Reusing existing Result node {existing_result_id} from knowledge graph"
+                                )
+                                result_node = await memory.link_existing_result(
+                                    workflow_id=workflow_id,
+                                    existing_result_id=existing_result_id,
+                                )
+                                print(
+                                    f"INFO: ✅ Linked existing Result node {existing_result_id} to conversation {workflow_id}"
+                                )
+                                # No need to re-index - it's already indexed
+                            else:
+                                # Extract title from H1 in markdown
+                                title = extract_h1_from_markdown(markdown_report)
+                                print(f"INFO: Extracted title from markdown: {title}")
+                                result_node = await memory.add_result(
+                                    workflow_id=workflow_id,
+                                    short_summary=short_summary,
+                                    markdown_report=markdown_report,
+                                    title=title,
+                                    image_file_path=image_file_path,
+                                )
+                                print(
+                                    f"INFO: ✅ Research result saved as Result node for conversation {workflow_id} (from status check)"
+                                )
+
+                                # Index the result in Neo4j for RAG
+                                try:
+                                    from openai_agents.memory.neo4j_rag import (
+                                        get_neo4j_rag,
+                                    )
+
+                                    rag = await get_neo4j_rag()
+                                    if rag:
+                                        await rag.index_result_node(
+                                            result_node.result_id, markdown_report
+                                        )
+                                        print(
+                                            f"INFO: ✅ Indexed result {result_node.result_id} for RAG"
+                                        )
+                                except Exception as rag_error:
+                                    print(
+                                        f"WARNING: Failed to index result for RAG: {rag_error}"
+                                    )
                         else:
                             print(
                                 f"WARNING: Workflow status is {desc.status}, not COMPLETED yet"
@@ -465,11 +510,17 @@ async def get_result(workflow_id: str):
         markdown_report = result.get("markdown_report", "")
         image_file_path = result.get("image_file_path")
         follow_up_questions = result.get("follow_up_questions", [])
+        existing_result_id = result.get("existing_result_id")
     else:
         short_summary = result.short_summary
         markdown_report = result.markdown_report
         image_file_path = result.image_file_path
         follow_up_questions = result.follow_up_questions or []
+        existing_result_id = getattr(result, "existing_result_id", None)
+
+    # Normalize image_file_path to ensure it starts with / for web serving
+    if image_file_path and not image_file_path.startswith("/"):
+        image_file_path = f"/{image_file_path}"
 
     # Save final research result as a Result node (check if already saved to avoid duplicates)
     memory = await get_neo4j_memory()
@@ -482,21 +533,50 @@ async def get_result(workflow_id: str):
                 f"INFO: Existing results count in get_result(): {len(existing_results)}"
             )
             if not existing_results:
-                # Save as a Result node (not a Message node)
-                print(f"INFO: Saving result to Neo4j for workflow {workflow_id}...")
-                # Extract title from H1 in markdown
-                title = extract_h1_from_markdown(markdown_report)
-                print(f"INFO: Extracted title from markdown: {title}")
-                await memory.add_result(
-                    workflow_id=workflow_id,
-                    short_summary=short_summary,
-                    markdown_report=markdown_report,
-                    title=title,
-                    image_file_path=image_file_path,
-                )
-                print(
-                    f"INFO: ✅ Research result saved as Result node for conversation {workflow_id} (from get_result endpoint)"
-                )
+                # Check if this is a reused result from knowledge graph
+                if existing_result_id:
+                    print(
+                        f"INFO: Reusing existing Result node {existing_result_id} from knowledge graph"
+                    )
+                    result_node = await memory.link_existing_result(
+                        workflow_id=workflow_id,
+                        existing_result_id=existing_result_id,
+                    )
+                    print(
+                        f"INFO: ✅ Linked existing Result node {existing_result_id} to conversation {workflow_id} (from get_result endpoint)"
+                    )
+                    # No need to re-index - it's already indexed
+                else:
+                    # Save as a Result node (not a Message node)
+                    print(f"INFO: Saving result to Neo4j for workflow {workflow_id}...")
+                    # Extract title from H1 in markdown
+                    title = extract_h1_from_markdown(markdown_report)
+                    print(f"INFO: Extracted title from markdown: {title}")
+                    result_node = await memory.add_result(
+                        workflow_id=workflow_id,
+                        short_summary=short_summary,
+                        markdown_report=markdown_report,
+                        title=title,
+                        image_file_path=image_file_path,
+                    )
+                    print(
+                        f"INFO: ✅ Research result saved as Result node for conversation {workflow_id} (from get_result endpoint)"
+                    )
+
+                    # Index the result in Neo4j for RAG
+                    try:
+                        from openai_agents.memory.neo4j_rag import get_neo4j_rag
+
+                        rag = await get_neo4j_rag()
+                        if rag:
+                            await rag.index_result_node(
+                                result_node.result_id, markdown_report
+                            )
+                            print(
+                                f"INFO: ✅ Indexed result {result_node.result_id} for RAG"
+                            )
+                    except Exception as rag_error:
+                        print(f"WARNING: Failed to index result for RAG: {rag_error}")
             else:
                 print(
                     f"INFO: Result already exists for conversation {workflow_id}, skipping save"
@@ -511,13 +591,29 @@ async def get_result(workflow_id: str):
             f"WARNING: Neo4j memory not available, cannot save result for {workflow_id}"
         )
 
-    # return {
-    #     "workflow_id": workflow_id,
-    #     "markdown_report": result.markdown_report,
-    #     "short_summary": result.short_summary,
-    #     "follow_up_questions": result.follow_up_questions or [],
-    # }
+    # Normalize image_file_path in the result object before returning
+    if isinstance(result, dict):
+        img_path = result.get("image_file_path")
+        if img_path and not img_path.startswith("/"):
+            result["image_file_path"] = f"/{img_path}"
+    else:
+        # Convert dataclass to dict for JSON serialization
+        if hasattr(result, "image_file_path") and result.image_file_path:
+            if not result.image_file_path.startswith("/"):
+                result.image_file_path = f"/{result.image_file_path}"
+        # Convert to dict for proper JSON serialization
+        result = {
+            "workflow_id": workflow_id,
+            "short_summary": result.short_summary,
+            "markdown_report": result.markdown_report,
+            "follow_up_questions": result.follow_up_questions or [],
+            "image_file_path": result.image_file_path,
+            "existing_result_id": getattr(result, "existing_result_id", None),
+        }
 
+    print(
+        f"INFO: Returning result with image_file_path: {result.get('image_file_path') if isinstance(result, dict) else getattr(result, 'image_file_path', None)}"
+    )
     return result
 
 
