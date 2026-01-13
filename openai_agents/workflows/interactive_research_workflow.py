@@ -6,6 +6,7 @@ from typing import Any
 from temporalio import activity, workflow
 from temporalio.exceptions import ApplicationError
 
+from openai_agents.workflows.redpanda_activity import publish_workflow_event
 from openai_agents.workflows.research_agents.research_manager import (
     InteractiveResearchManager,
 )
@@ -280,6 +281,23 @@ class InteractiveResearchWorkflow:
                 workflow.logger.info(
                     f"Building result with image_path: {image_path}, existing_result_id: {self.research_manager.existing_result_id}"
                 )
+
+                # Publish research_complete event
+                await workflow.execute_activity(
+                    publish_workflow_event,
+                    args=[
+                        "research_complete",
+                        workflow.info().workflow_id,
+                        {
+                            "report_length": len(self.report_data.markdown_report),
+                            "has_image": image_path is not None,
+                            "image_path": image_path,
+                            "summary": self.report_data.short_summary[:100],
+                        },
+                    ],
+                    start_to_close_timeout=timedelta(seconds=10),
+                )
+
                 return self._build_result(
                     self.report_data.short_summary,
                     self.report_data.markdown_report,
@@ -308,8 +326,33 @@ class InteractiveResearchWorkflow:
                             None,
                         )
 
+                    # Publish clarifications_complete event
+                    await workflow.execute_activity(
+                        publish_workflow_event,
+                        args=[
+                            "clarifications_complete",
+                            workflow.info().workflow_id,
+                            {
+                                "responses": self.clarification_responses,
+                                "total_answered": len(self.clarification_responses),
+                            },
+                        ],
+                        start_to_close_timeout=timedelta(seconds=10),
+                    )
+
                     # Complete research with clarifications
                     if self.original_query:  # Type guard to ensure it's not None
+                        # Publish research_started event
+                        await workflow.execute_activity(
+                            publish_workflow_event,
+                            args=[
+                                "research_started",
+                                workflow.info().workflow_id,
+                                {"query": self.original_query},
+                            ],
+                            start_to_close_timeout=timedelta(seconds=10),
+                        )
+
                         self.report_data = await self.research_manager.run_with_clarifications_complete(
                             self.original_query,
                             self.clarification_questions,
@@ -377,6 +420,17 @@ class InteractiveResearchWorkflow:
         workflow.logger.info(f"Starting research for query: '{input.query}'")
         self.original_query = input.query
 
+        # Publish query_received event
+        await workflow.execute_activity(
+            publish_workflow_event,
+            args=[
+                "query_received",
+                workflow.info().workflow_id,
+                {"query": input.query},
+            ],
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+
         # Immediately check if clarifications are needed
         result = await self.research_manager.run_with_clarifications_start(
             self.original_query
@@ -385,6 +439,20 @@ class InteractiveResearchWorkflow:
         if result.needs_clarifications:
             # Set up clarifying questions for client to see immediately
             self.clarification_questions = result.questions or []
+
+            # Publish clarifications_generated event
+            await workflow.execute_activity(
+                publish_workflow_event,
+                args=[
+                    "clarifications_generated",
+                    workflow.info().workflow_id,
+                    {
+                        "questions": self.clarification_questions,
+                        "count": len(self.clarification_questions),
+                    },
+                ],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
         else:
             # No clarifications needed, store the research data but let main loop complete it
             if result.report_data is not None:
@@ -418,6 +486,23 @@ class InteractiveResearchWorkflow:
         # Apply result to workflow state
         self.clarification_responses[result.question_key] = result.answer
         self.current_question_index = result.new_index
+
+        # Publish clarification_answered event
+        await workflow.execute_activity(
+            publish_workflow_event,
+            args=[
+                "clarification_answered",
+                workflow.info().workflow_id,
+                {
+                    "question_index": input.question_index,
+                    "question": current_question,
+                    "answer": input.answer,
+                    "answers_collected": len(self.clarification_responses),
+                    "total_questions": len(self.clarification_questions),
+                },
+            ],
+            start_to_close_timeout=timedelta(seconds=10),
+        )
 
         return self.get_status()
 

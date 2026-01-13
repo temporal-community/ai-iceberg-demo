@@ -45,6 +45,7 @@ This example is designed to be similar to the OpenAI Cookbook: [Introduction to 
 3. **OpenAI API Key** - Set as environment variable `OPENAI_API_KEY` in .env file (note, you will need enough quota on in your [OpenAI account](https://platform.openai.com/api-keys) to run this demo)
 4. **PDF Generation Dependencies** - Required for PDF output (optional)
 5. **Neo4j Database** (optional) - For conversation memory/persistence. See [Neo4j Setup](#neo4j-setup-optional) below.
+6. **Redpanda** (optional) - For real-time event streaming of workflow progress. See [Redpanda Setup](#redpanda-setup-optional) below.
 
 ## Install / Upgrade Temporal CLI
 You'll need the latest version to run the demo.
@@ -127,6 +128,175 @@ NEO4J_PASSWORD=your-password
    ```
 
 **Note:** If Neo4j is not configured, the app will gracefully degrade - all features will work except conversation history and resuming conversations.
+
+## Redpanda Setup (Optional)
+
+Redpanda provides real-time event streaming for workflow progress tracking. The app works without Redpanda, but when configured, you can stream workflow events (clarifications, search progress, image generation, report completion, etc.) to external consumers for monitoring, analytics, or custom UI integrations.
+
+**📖 For detailed setup, monitoring, and troubleshooting, see [REDPANDA.md](REDPANDA.md)**
+
+### Event Types
+
+When Redpanda is configured, the following events are streamed:
+
+**Lifecycle Events:**
+- `query_received` - User submits initial research query
+- `research_started` - Research pipeline begins after clarifications
+- `research_complete` - Entire workflow finished with results
+
+**Clarification Events:**
+- `clarifications_generated` - Questions created by triage agent
+- `clarification_answered` - Single answer received (includes progress)
+- `clarifications_complete` - All clarification answers collected
+
+**Research Pipeline Events:**
+- `knowledge_graph_hit` - Exact match found in knowledge graph (cached result)
+- `search_plan_created` - Search plan generated with number of searches
+- `search_executing` - Web search progress updates (current/total)
+- `report_writing` - Report generation starts
+- `report_generated` - Markdown report complete
+
+**Artifact Generation Events:**
+- `image_generation_started` - Image generation begins (runs in parallel)
+- `image_generated` - Image ready with file path
+- `pdf_generation_started` - PDF conversion begins
+- `pdf_generated` - PDF ready with file path
+
+### Option 1: Redpanda Serverless (Recommended)
+
+1. Sign up for [Redpanda Cloud](https://redpanda.com/try-redpanda)
+2. Create a Serverless cluster
+3. Create a topic (e.g., `research-workflow-events`)
+4. Get your connection credentials
+5. Update your `.env` file:
+   ```bash
+   REDPANDA_BOOTSTRAP_SERVERS='your-broker-1.redpanda.cloud:9092,your-broker-2.redpanda.cloud:9092'
+   REDPANDA_TOPIC='research-workflow-events'
+   REDPANDA_SASL_MECHANISM='SCRAM-SHA-256'
+   REDPANDA_SASL_USERNAME='your-username'
+   REDPANDA_SASL_PASSWORD='your-password'
+   REDPANDA_SECURITY_PROTOCOL='SASL_SSL'
+   ```
+
+### Option 2: Local Redpanda (Docker)
+
+**1. Start Redpanda container:**
+```bash
+docker run -d \
+  --name redpanda \
+  -p 9092:9092 \
+  -p 9644:9644 \
+  docker.redpanda.com/redpandadata/redpanda:latest \
+  redpanda start \
+  --smp 1 \
+  --memory 1G \
+  --overprovisioned \
+  --node-id 0 \
+  --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092 \
+  --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+```
+
+**2. Create the topic:**
+```bash
+# Create the main topic
+docker exec -it redpanda rpk topic create research-workflow-events
+
+# (Optional) Create separate topics for different event categories
+docker exec -it redpanda rpk topic create workflow-lifecycle
+docker exec -it redpanda rpk topic create workflow-clarifications
+docker exec -it redpanda rpk topic create workflow-research
+docker exec -it redpanda rpk topic create workflow-artifacts
+```
+
+**3. Verify topic creation:**
+```bash
+docker exec -it redpanda rpk topic list
+```
+
+**4. Update your `.env` file:**
+```bash
+REDPANDA_BOOTSTRAP_SERVERS='localhost:9092'
+REDPANDA_TOPIC='research-workflow-events'
+```
+
+**Note:** Topics can also be auto-created when the first message is published, but explicit creation allows you to configure retention, partitions, and other settings upfront.
+
+### Option 3: Self-Hosted Redpanda
+
+Follow the [Redpanda installation guide](https://docs.redpanda.com/docs/deploy/deployment-option/) for your environment, then configure the connection details in your `.env` file.
+
+### Monitoring & Verifying Events
+
+**Quick Start - Watch Events in Real-Time:**
+```bash
+# Use rpk to watch events as they stream in
+docker exec -it redpanda rpk topic consume research-workflow-events -f '%v\n' | jq .
+```
+
+**Redpanda Console (Web UI):**
+
+For a visual interface, run Redpanda Console:
+```bash
+docker run -d \
+  --name redpanda-console \
+  --network redpanda-network \
+  -p 8080:8080 \
+  -e KAFKA_BROKERS=redpanda:29092 \
+  docker.redpanda.com/redpandadata/console:latest
+```
+
+Then open http://localhost:8080 to view topics, messages, and metrics.
+
+**More Options:**
+- See [REDPANDA.md](REDPANDA.md) for detailed monitoring options, troubleshooting, and advanced configuration
+
+### Topic Routing (Advanced)
+
+You can route different event categories to separate topics for fine-grained control:
+
+```bash
+# Single topic for all events (default)
+REDPANDA_TOPIC='research-workflow-events'
+
+# Or separate topics per category
+REDPANDA_TOPIC_LIFECYCLE='workflow-lifecycle'
+REDPANDA_TOPIC_CLARIFICATIONS='workflow-clarifications'
+REDPANDA_TOPIC_RESEARCH='workflow-research'
+REDPANDA_TOPIC_ARTIFACTS='workflow-artifacts'
+```
+
+### Event Payload Format
+
+All events follow this structure:
+```json
+{
+  "event_type": "search_executing",
+  "workflow_id": "workflow-id-123",
+  "timestamp": "2026-01-13T12:34:56.789Z",
+  "data": {
+    "current": 2,
+    "total": 5
+  }
+}
+```
+
+**Note:** If Redpanda is not configured (no `REDPANDA_BOOTSTRAP_SERVERS` in `.env`), the app will work normally without event streaming. All workflow functionality remains intact.
+
+### Troubleshooting Redpanda
+
+**Common Issues:**
+
+1. **No events appearing:** Verify topic exists and broker is running
+   ```bash
+   docker ps | grep redpanda
+   docker exec -it redpanda rpk topic list
+   ```
+
+2. **Connection refused:** Ensure Redpanda is running and `.env` has `REDPANDA_BOOTSTRAP_SERVERS='localhost:9092'`
+
+3. **Console not connecting:** Use Docker network method (see [REDPANDA.md](REDPANDA.md#docker-network-setup-recommended))
+
+For detailed troubleshooting, advanced configuration, and monitoring options, see **[REDPANDA.md](REDPANDA.md)**.
 
 ## Setup
 

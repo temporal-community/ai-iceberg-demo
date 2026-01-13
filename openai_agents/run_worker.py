@@ -21,6 +21,7 @@ from openai_agents.workflows.interactive_research_workflow import (
     search_knowledge_graph,
 )
 from openai_agents.workflows.pdf_generation_activity import generate_pdf
+from openai_agents.workflows.redpanda_activity import publish_workflow_event
 
 # Load environment variables
 load_dotenv()
@@ -74,6 +75,7 @@ async def main():
             process_clarification,
             check_knowledge_graph_exact_match,
             search_knowledge_graph,
+            publish_workflow_event,
         ],
     )
     await worker.run()
