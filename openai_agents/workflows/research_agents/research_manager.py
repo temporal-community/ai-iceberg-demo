@@ -11,6 +11,9 @@ from temporalio import workflow
 # Load environment variables
 load_dotenv()
 
+# Import Redpanda activity for event publishing
+from openai_agents.workflows.redpanda_activity import publish_workflow_event
+
 
 with workflow.unsafe.imports_passed_through():
     # TODO: Restore progress updates
@@ -346,6 +349,21 @@ class InteractiveResearchManager:
                     f"   Stored existing_image_path: {self.existing_image_path}"
                 )
 
+                # Publish knowledge_graph_hit event
+                await workflow.execute_activity(
+                    publish_workflow_event,
+                    args=[
+                        "knowledge_graph_hit",
+                        workflow.info().workflow_id,
+                        {
+                            "score": result.score,
+                            "cached": True,
+                            "result_id": result.result_id,
+                        },
+                    ],
+                    start_to_close_timeout=timedelta(seconds=10),
+                )
+
                 # Convert Result to ReportData
                 return ReportData(
                     short_summary=result.short_summary or "",
@@ -412,11 +430,37 @@ class InteractiveResearchManager:
             input_str,
             run_config=self.run_config,
         )
-        return result.final_output_as(WebSearchPlan)
+        plan = result.final_output_as(WebSearchPlan)
+
+        # Publish search_plan_created event
+        await workflow.execute_activity(
+            publish_workflow_event,
+            args=[
+                "search_plan_created",
+                workflow.info().workflow_id,
+                {"search_count": len(plan.searches)},
+            ],
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+
+        return plan
 
     async def _perform_searches(self, search_plan: WebSearchPlan) -> list[str]:
         with custom_span("Search the web"):
             num_completed = 0
+            total_searches = len(search_plan.searches)
+
+            # Publish search_executing event
+            await workflow.execute_activity(
+                publish_workflow_event,
+                args=[
+                    "search_executing",
+                    workflow.info().workflow_id,
+                    {"current": 0, "total": total_searches},
+                ],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+
             tasks = [
                 asyncio.create_task(self._search(item)) for item in search_plan.searches
             ]
@@ -426,6 +470,17 @@ class InteractiveResearchManager:
                 if result is not None:
                     results.append(result)
                 num_completed += 1
+
+                # Publish progress update
+                await workflow.execute_activity(
+                    publish_workflow_event,
+                    args=[
+                        "search_executing",
+                        workflow.info().workflow_id,
+                        {"current": num_completed, "total": total_searches},
+                    ],
+                    start_to_close_timeout=timedelta(seconds=10),
+                )
             return results
 
     async def _search(self, item: WebSearchItem) -> str | None:
@@ -447,6 +502,17 @@ class InteractiveResearchManager:
             f"Original query: {query}\nSummarized search results: {search_results}"
         )
 
+        # Publish report_writing event
+        await workflow.execute_activity(
+            publish_workflow_event,
+            args=[
+                "report_writing",
+                workflow.info().workflow_id,
+                {"query": query[:100]},
+            ],
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+
         # Generate markdown report
         markdown_result = await Runner.run(
             self.writer_agent,
@@ -455,6 +521,18 @@ class InteractiveResearchManager:
         )
 
         report_data = markdown_result.final_output_as(ReportData)
+
+        # Publish report_generated event
+        await workflow.execute_activity(
+            publish_workflow_event,
+            args=[
+                "report_generated",
+                workflow.info().workflow_id,
+                {"format": "markdown", "length": len(report_data.markdown_report)},
+            ],
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+
         return report_data
 
     async def _generate_research_image(
@@ -477,6 +555,17 @@ class InteractiveResearchManager:
         with custom_span("Generate research image"):
             try:
                 workflow.logger.info("Generating image with ImageGenAgent...")
+
+                # Publish image_generation_started event
+                await workflow.execute_activity(
+                    publish_workflow_event,
+                    args=[
+                        "image_generation_started",
+                        workflow.info().workflow_id,
+                        {"query": query[:100]},
+                    ],
+                    start_to_close_timeout=timedelta(seconds=10),
+                )
 
                 result = await Runner.run(
                     self.imagegen_agent,
@@ -520,6 +609,20 @@ class InteractiveResearchManager:
                     f"Image generated successfully: {image_output.image_file_path}"
                 )
 
+                # Publish image_generated event
+                await workflow.execute_activity(
+                    publish_workflow_event,
+                    args=[
+                        "image_generated",
+                        workflow.info().workflow_id,
+                        {
+                            "image_path": image_output.image_file_path,
+                            "description": image_output.image_description,
+                        },
+                    ],
+                    start_to_close_timeout=timedelta(seconds=10),
+                )
+
                 return (
                     image_output.image_file_path,
                     image_output.image_description,
@@ -536,6 +639,17 @@ class InteractiveResearchManager:
     async def _generate_pdf_report(self, report_data: ReportData) -> str | None:
         """Generate PDF from markdown report, return file path"""
         try:
+            # Publish pdf_generation_started event
+            await workflow.execute_activity(
+                publish_workflow_event,
+                args=[
+                    "pdf_generation_started",
+                    workflow.info().workflow_id,
+                    {},
+                ],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+
             pdf_result = await Runner.run(
                 self.pdf_generator_agent,
                 f"Convert this markdown report to PDF:\n\n{report_data.markdown_report}",
@@ -544,6 +658,16 @@ class InteractiveResearchManager:
 
             pdf_output = pdf_result.final_output_as(type(pdf_result.final_output))
             if pdf_output.success:
+                # Publish pdf_generated event
+                await workflow.execute_activity(
+                    publish_workflow_event,
+                    args=[
+                        "pdf_generated",
+                        workflow.info().workflow_id,
+                        {"pdf_path": pdf_output.pdf_file_path},
+                    ],
+                    start_to_close_timeout=timedelta(seconds=10),
+                )
                 return pdf_output.pdf_file_path
         except Exception:
             # If PDF generation fails, return None
