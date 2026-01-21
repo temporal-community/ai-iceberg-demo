@@ -19,6 +19,7 @@ dependencies = [
     "neo4j>=5.0.0,<6",
     "openai>=1.0.0,<2",
     "kafka-python>=2.0.0,<3",
+    "certifi>=2026.1.4",
 ]
 
 [project.urls]

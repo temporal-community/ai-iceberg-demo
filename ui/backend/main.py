@@ -42,6 +42,14 @@ from openai_agents.workflows.research_agents.research_models import (
 # Load environment variables
 load_dotenv()
 
+# Certifi for TLS certs for Neo4j AuraDB
+try:
+    import certifi
+
+    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+except ImportError:
+    pass
+
 TEMPORAL_TASK_QUEUE = os.getenv("TEMPORAL_TASK_QUEUE", "research-queue")
 
 
