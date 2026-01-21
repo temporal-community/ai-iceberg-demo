@@ -90,7 +90,19 @@ at the root of the repository. See the .env-sample file for details.
 
 Neo4j is used to persist conversation/workflow history, allowing users to resume previous conversations after page reloads. The app will work without Neo4j, but conversations won't be saved or resumable.
 
-### Option 1: Using Docker (Recommended)
+### Option 1: Neo4j AuraDB (Cloud)
+
+1. Sign up for [Neo4j AuraDB](https://neo4j.com/cloud/aura/)
+2. Create a free instance
+3. Copy the connection URI and credentials
+4. Update your `.env` file:
+   ```
+   NEO4J_URI=neo4j+s://your-instance.databases.neo4j.io
+   NEO4J_USER=neo4j
+   NEO4J_PASSWORD=your-password
+   ```
+
+### Option 2: Local Docker
 
 ```bash
 docker run \
@@ -107,27 +119,7 @@ NEO4J_USER=neo4j
 NEO4J_PASSWORD=your-password
 ```
 
-### Option 2: Using Neo4j Desktop
-
-1. Download and install [Neo4j Desktop](https://neo4j.com/download/)
-2. Create a new database
-3. Start the database
-4. Note the connection details (usually `bolt://localhost:7687`)
-5. Update your `.env` file with the connection details
-
-### Option 3: Neo4j AuraDB (Cloud)
-
-1. Sign up for [Neo4j AuraDB](https://neo4j.com/cloud/aura/)
-2. Create a free instance
-3. Copy the connection URI and credentials
-4. Update your `.env` file:
-   ```
-   NEO4J_URI=neo4j+s://your-instance.databases.neo4j.io
-   NEO4J_USER=neo4j
-   NEO4J_PASSWORD=your-password
-   ```
-
-**Note:** If Neo4j is not configured, the app will gracefully degrade - all features will work except conversation history and resuming conversations.
+**Note:** If Neo4j is not configured, all features will work except cached conversations.
 
 ## Redpanda Setup (Optional)
 
