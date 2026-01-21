@@ -42,6 +42,26 @@ from openai_agents.workflows.research_agents.research_models import (
 # Load environment variables
 load_dotenv()
 
+
+# Certifi for TLS certs for Neo4j AuraDB
+def configure_tls_ca_bundle() -> None:
+    # If the user (or platform) already provided a CA bundle, respect it.
+    if os.getenv("SSL_CERT_FILE") or os.getenv("SSL_CERT_DIR"):
+        return
+
+    # Otherwise, fall back to certifi's bundle for consistent public CA trust.
+    try:
+        import certifi
+
+        os.environ["SSL_CERT_FILE"] = certifi.where()
+    except ImportError:
+        # If certifi isn't available, do nothing and let the default trust store apply.
+        pass
+
+
+configure_tls_ca_bundle()
+
+
 TEMPORAL_TASK_QUEUE = os.getenv("TEMPORAL_TASK_QUEUE", "research-queue")
 
 
