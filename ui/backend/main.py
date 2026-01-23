@@ -20,10 +20,16 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from auth0_fastapi.auth import AuthClient
+from auth0_fastapi.config import Auth0Config
+from fastapi import FastAPI, HTTPException, Request, Response, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
+from auth0_fastapi.server.routes import router, register_auth_routes
+from auth0_fastapi.errors import AccessTokenForConnectionError
+#from auth0 import auth0_config, auth0_client
 from pydantic import BaseModel
 from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
@@ -44,6 +50,26 @@ load_dotenv()
 
 TEMPORAL_TASK_QUEUE = os.getenv("TEMPORAL_TASK_QUEUE", "research-queue")
 
+AUTH0_CLIENT_ID=os.getenv("AUTH0_CLIENT_ID")
+AUTH0_CLIENT_SECRET=os.getenv("AUTH0_CLIENT_SECRET")
+AUTH0_DOMAIN=os.getenv("AUTH0_DOMAIN")
+APP_SECRET_KEY=os.getenv("APP_SECRET_KEY")
+BASE_URL=os.getenv("BASE_URL")
+
+auth0_config = Auth0Config(
+    domain=AUTH0_DOMAIN,
+    clientId=AUTH0_CLIENT_ID,
+    clientSecret=AUTH0_CLIENT_SECRET,
+    authorization_params={
+        "scope": "openid profile email offline_access",
+        "prompt": "consent"
+    },
+    mount_connected_account_routes = True,
+    appBaseUrl=BASE_URL,
+    secret=APP_SECRET_KEY
+)
+
+auth0_client = AuthClient(auth0_config)
 
 def extract_h1_from_markdown(markdown: str) -> Optional[str]:
     """
@@ -86,6 +112,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(SessionMiddleware, secret_key=os.getenv("APP_SECRET_KEY"))
+app.state.auth_config = auth0_config
+app.state.auth_client = auth0_client
+
+register_auth_routes(router, auth0_config)
+app.include_router(router)
+
 
 # ============================================
 # Temporal Client Setup
@@ -155,8 +189,13 @@ class ConversationResponse(BaseModel):
 # Static File Serving
 # ============================================
 @app.get("/")
-async def serve_index():
+async def serve_index(request: Request, response: Response):
     """Serve the main chat interface"""
+    try:
+        await auth0_client.require_session(request, response)
+    except Exception as e:
+        return RedirectResponse(url="/auth/login")
+
     index_path = Path(__file__).parent.parent / "index.html"
     if index_path.exists():
         return HTMLResponse(content=index_path.read_text())
@@ -164,8 +203,13 @@ async def serve_index():
 
 
 @app.get("/success")
-async def serve_success():
+async def serve_success(request: Request, response: Response):
     """Serve the success/results page"""
+    try:
+        await auth0_client.require_session(request, response)
+    except Exception as e:
+        return RedirectResponse(url="/auth/login")
+
     success_path = Path(__file__).parent.parent / "success.html"
     if success_path.exists():
         return HTMLResponse(content=success_path.read_text())
@@ -190,7 +234,7 @@ app.mount(
 
 
 @app.post("/api/start-research")
-async def start_research(request: StartResearchRequest):
+async def start_research(request: StartResearchRequest, _auth_session = Depends(auth0_client.require_session)):
     """
     Start a new research workflow.
 
@@ -247,7 +291,7 @@ async def start_research(request: StartResearchRequest):
 
 
 @app.get("/api/status/{workflow_id}")
-async def get_status(workflow_id: str):
+async def get_status(workflow_id: str, _auth_session = Depends(auth0_client.require_session)):
     """
     Get current workflow status.
 
@@ -416,7 +460,9 @@ async def get_status(workflow_id: str):
 
 @app.post("/api/answer/{workflow_id}/{current_question_index}")
 async def submit_answer(
-    workflow_id: str, current_question_index: int, request: AnswerRequest
+    workflow_id: str, current_question_index: int,
+    request: AnswerRequest,
+    _auth_session = Depends(auth0_client.require_session)
 ):
     """
     Submit an answer to a clarification question.
@@ -484,7 +530,7 @@ async def submit_answer(
 
 
 @app.get("/api/result/{workflow_id}")
-async def get_result(workflow_id: str):
+async def get_result(workflow_id: str, _auth_session = Depends(auth0_client.require_session)):
     """
     Get final research result.
 
@@ -618,7 +664,7 @@ async def get_result(workflow_id: str):
 
 
 @app.get("/api/stream/{workflow_id}")
-async def stream_status(workflow_id: str):
+async def stream_status(workflow_id: str, _auth_session = Depends(auth0_client.require_session)):
     """
     Server-Sent Events endpoint for live status updates.
 
@@ -662,7 +708,10 @@ async def stream_status(workflow_id: str):
 
 
 @app.get("/api/conversations")
-async def list_conversations(limit: int = 50, offset: int = 0):
+async def list_conversations(
+    limit: int = 50,
+    offset: int = 0,
+    _auth_session = Depends(auth0_client.require_session)):
     """
     List all conversations from Neo4j memory.
 
@@ -685,7 +734,7 @@ async def list_conversations(limit: int = 50, offset: int = 0):
 
 
 @app.get("/api/conversations/{workflow_id}")
-async def get_conversation(workflow_id: str):
+async def get_conversation(workflow_id: str, _auth_session = Depends(auth0_client.require_session)):
     """
     Get a specific conversation by workflow ID.
 
@@ -710,7 +759,7 @@ async def get_conversation(workflow_id: str):
 
 
 @app.get("/api/conversations/{workflow_id}/messages")
-async def get_conversation_messages(workflow_id: str):
+async def get_conversation_messages(workflow_id: str, _auth_session = Depends(auth0_client.require_session)):
     """
     Get all messages for a conversation, ordered by sequence.
 
