@@ -1,18 +1,23 @@
 # Temporal Interactive Deep Research Demo using OpenAI Agents SDK
 
-This repository builds on the Temporal Interactive Deep Research Demo by @steveandroulakis, adding a web-based user interface.
+
+
+This repository builds on the Temporal Interactive Deep Research Demo by @steveandroulakis and now highlights the full joint solution. Temporal provides the orchestration backbone, Neo4j serves as the knowledge graph store for conversation memory, Redpanda Data streams structured workflow events to downstream consumers, and Auth0 secures tool calls and agent access. A web-based interface stitches the full experience together for interactive research sessions. View the architecture reference diagram below for an overview of how each component connects.
+
+![Architecture Overview](architecture_diagram.png)
 
 For detailed information about the research agents in this repo, see [openai_agents/workflows/research_agents/README.md](openai_agents/workflows/research_agents/README.md)
 Access original repo [here](https://github.com/steveandroulakis/openai-agents-demos)
 
 ## Key Features
 
-- **Temporal Workflows**: This demo uses Temporal for reliable workflow orchestration
+- **Temporal Orchestration**: Temporal manages durable and observable workflows and activities across the system
+- **Neo4j Knowledge Store**: Neo4j persistently captures conversations, workflow history, and memory for resumable sessions
+- **Redpanda Data Streaming**: Workflow events stream through Redpanda for analytics, monitoring, and downstream automation
+- **Auth0 Security**: Auth0 protects the UI, tool calls, and agent access tokens across the stack
 - **OpenAI Agents**: Powered by the OpenAI Agents SDK for natural language processing
-- **Multi-Agent Systems**: The research demo showcases complex multi-agent coordination
-- **Interactive Workflows**: Research demo supports real-time user interaction
-- **Tool Integration**: Tools demo shows how to integrate external activities
-- **PDF Generation**: Interactive research workflow generates professional PDF reports alongside markdown
+- **Multi-Agent Interactive Research**: Clarifying, planning, searching, writing, and artifact generation agents collaborate in real time
+- **PDF Generation**: Interactive workflow produces professionally formatted reports alongside markdown deliverables
 
 ## About this Demo: Multi-Agent Interactive Research Workflow
 
