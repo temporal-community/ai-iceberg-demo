@@ -89,25 +89,36 @@ async def check_knowledge_graph_exact_match(
             activity.logger.warning("⚠️ Neo4j RAG not available")
             return KnowledgeGraphExactMatchResult(found=False)
 
-        match = await rag.get_best_match(input.query, min_score=input.min_score)
-        if match:
-            node_dict, score = match
+        # Always fetch the best match at a low threshold so we can log the actual score
+        best = await rag.get_best_match(input.query, min_score=0.3)
+        if best:
+            node_dict, score = best
             result_id = node_dict.get("result_id")
             image_file_path = node_dict.get("image_file_path")
+            title = node_dict.get("title", "N/A")
             activity.logger.info(
-                f"🎯 Found high similarity match (score: {score:.2f}) in knowledge graph! Result ID: {result_id}, Image: {image_file_path}"
+                f"📊 Best match: score={score:.4f}, title='{title[:50]}', threshold={input.min_score}"
             )
-            return KnowledgeGraphExactMatchResult(
-                found=True,
-                short_summary=node_dict.get("short_summary", ""),
-                markdown_report=node_dict.get("markdown_report", ""),
-                score=score,
-                result_id=result_id,
-                image_file_path=image_file_path,
-            )
+            if score >= input.min_score:
+                activity.logger.info(
+                    f"🎯 Score {score:.4f} >= {input.min_score} — returning match! Result ID: {result_id}, Image: {image_file_path}"
+                )
+                return KnowledgeGraphExactMatchResult(
+                    found=True,
+                    short_summary=node_dict.get("short_summary", ""),
+                    markdown_report=node_dict.get("markdown_report", ""),
+                    score=score,
+                    result_id=result_id,
+                    image_file_path=image_file_path,
+                )
+            else:
+                activity.logger.info(
+                    f"❌ Score {score:.4f} < {input.min_score} — not a match"
+                )
+                return KnowledgeGraphExactMatchResult(found=False)
         else:
             activity.logger.info(
-                f"❌ No exact match found (similarity < {input.min_score})"
+                f"❌ No results found in knowledge graph at all"
             )
             return KnowledgeGraphExactMatchResult(found=False)
     except Exception as e:
@@ -205,6 +216,7 @@ class InteractiveResearchWorkflow:
         self.research_completed: bool = False
         self.workflow_ended: bool = False
         self.research_initialized: bool = False
+        self.early_match_found: bool = False
 
     def _build_result(
         self,
@@ -261,6 +273,12 @@ class InteractiveResearchWorkflow:
                 or self.research_initialized
             )
 
+            workflow.logger.info(
+                f"🔔 Main loop woke up: ended={self.workflow_ended}, completed={self.research_completed}, "
+                f"initialized={self.research_initialized}, questions={len(self.clarification_questions)}, "
+                f"responses={len(self.clarification_responses)}"
+            )
+
             # If workflow was signaled to end, exit gracefully
             if self.workflow_ended:
                 return self._build_result(
@@ -308,14 +326,75 @@ class InteractiveResearchWorkflow:
 
             # If research is initialized but not completed, handle the clarification flow
             if self.research_initialized and not self.research_completed:
-                # If we have clarification questions, wait for all responses
+                workflow.logger.info(
+                    f"📋 Entering clarification flow: has_questions={bool(self.clarification_questions)}, "
+                    f"num_questions={len(self.clarification_questions)}, has_report={self.report_data is not None}"
+                )
+                # If we have clarification questions, wait for responses incrementally
                 if self.clarification_questions:
-                    # Wait for all clarifications to be collected
-                    await workflow.wait_condition(
-                        lambda: self.workflow_ended
-                        or len(self.clarification_responses)
-                        >= len(self.clarification_questions)
+                    # Process answers one at a time, checking similarity after each
+                    answers_processed = 0
+                    total_questions = len(self.clarification_questions)
+                    workflow.logger.info(
+                        f"🔄 Starting incremental similarity loop for {total_questions} questions"
                     )
+                    while answers_processed < total_questions:
+                        # Wait for the next answer to arrive
+                        workflow.logger.info(
+                            f"⏳ Waiting for answer {answers_processed + 1}/{total_questions}..."
+                        )
+                        target = answers_processed
+                        await workflow.wait_condition(
+                            lambda: self.workflow_ended
+                            or len(self.clarification_responses) > target
+                        )
+
+                        if self.workflow_ended:
+                            break
+
+                        answers_processed = len(self.clarification_responses)
+                        workflow.logger.info(
+                            f"📝 Received answer {answers_processed}/{total_questions}, running incremental similarity check"
+                        )
+
+                        # Build partial enriched query from answers so far
+                        partial_query = self.research_manager._enrich_query_partial(
+                            self.original_query,
+                            self.clarification_questions,
+                            self.clarification_responses,
+                        )
+                        workflow.logger.info(
+                            f"🔍 Partial enriched query: {partial_query[:200]}..."
+                        )
+
+                        # Check knowledge graph for exact match with partial query
+                        exact_match = await self.research_manager._check_knowledge_graph_for_exact_match(
+                            partial_query
+                        )
+
+                        if exact_match:
+                            workflow.logger.info(
+                                f"Early match found after {answers_processed}/{len(self.clarification_questions)} answers"
+                            )
+                            self.report_data = exact_match
+                            self.research_completed = True
+                            self.early_match_found = True
+
+                            # Publish early_match_found event
+                            await workflow.execute_activity(
+                                publish_workflow_event,
+                                args=[
+                                    "early_match_found",
+                                    workflow.info().workflow_id,
+                                    {
+                                        "answers_processed": answers_processed,
+                                        "total_questions": len(self.clarification_questions),
+                                        "query": partial_query[:100],
+                                    },
+                                ],
+                                start_to_close_timeout=timedelta(seconds=10),
+                            )
+                            break
 
                     if self.workflow_ended:
                         return self._build_result(
@@ -326,40 +405,42 @@ class InteractiveResearchWorkflow:
                             None,
                         )
 
-                    # Publish clarifications_complete event
-                    await workflow.execute_activity(
-                        publish_workflow_event,
-                        args=[
-                            "clarifications_complete",
-                            workflow.info().workflow_id,
-                            {
-                                "responses": self.clarification_responses,
-                                "total_answered": len(self.clarification_responses),
-                            },
-                        ],
-                        start_to_close_timeout=timedelta(seconds=10),
-                    )
-
-                    # Complete research with clarifications
-                    if self.original_query:  # Type guard to ensure it's not None
-                        # Publish research_started event
+                    # If no early match was found, run full research with all clarifications
+                    if not self.research_completed:
+                        # Publish clarifications_complete event
                         await workflow.execute_activity(
                             publish_workflow_event,
                             args=[
-                                "research_started",
+                                "clarifications_complete",
                                 workflow.info().workflow_id,
-                                {"query": self.original_query},
+                                {
+                                    "responses": self.clarification_responses,
+                                    "total_answered": len(self.clarification_responses),
+                                },
                             ],
                             start_to_close_timeout=timedelta(seconds=10),
                         )
 
-                        self.report_data = await self.research_manager.run_with_clarifications_complete(
-                            self.original_query,
-                            self.clarification_questions,
-                            self.clarification_responses,
-                        )
+                        # Complete research with clarifications
+                        if self.original_query:  # Type guard to ensure it's not None
+                            # Publish research_started event
+                            await workflow.execute_activity(
+                                publish_workflow_event,
+                                args=[
+                                    "research_started",
+                                    workflow.info().workflow_id,
+                                    {"query": self.original_query},
+                                ],
+                                start_to_close_timeout=timedelta(seconds=10),
+                            )
 
-                    self.research_completed = True
+                            self.report_data = await self.research_manager.run_with_clarifications_complete(
+                                self.original_query,
+                                self.clarification_questions,
+                                self.clarification_responses,
+                            )
+
+                        self.research_completed = True
                     continue
 
                 # If we already have report data (from direct research), mark as completed
@@ -390,6 +471,8 @@ class InteractiveResearchWorkflow:
         # Determine status based on workflow state
         if self.workflow_ended:
             status = "ended"
+        elif self.research_completed and self.early_match_found:
+            status = "match_found"
         elif self.research_completed:
             status = "completed"
         elif self.clarification_questions and len(self.clarification_responses) < len(
@@ -412,6 +495,7 @@ class InteractiveResearchWorkflow:
             current_question=current_question,
             status=status,
             research_completed=self.research_completed,
+            early_match_found=self.early_match_found,
         )
 
     @workflow.update
@@ -528,6 +612,9 @@ class InteractiveResearchWorkflow:
 
         if not self.original_query:
             raise ValueError("No active research interaction")
+
+        if self.early_match_found or self.research_completed:
+            raise ValueError("Research already completed")
 
         if not self.clarification_questions or len(self.clarification_responses) >= len(
             self.clarification_questions

@@ -303,6 +303,21 @@ class InteractiveResearchManager:
             enriched += f"- {question}: {answer}\n"
         return enriched
 
+    def _enrich_query_partial(
+        self, original_query: str, questions: List[str], responses: Dict[str, str]
+    ) -> str:
+        """Build a concise, embedding-friendly query from original query and answers so far.
+
+        Unlike _enrich_query which uses a verbose format for LLM prompts, this produces
+        a clean natural-language string optimized for vector similarity search.
+        """
+        parts = [original_query]
+        for i, question in enumerate(questions):
+            answer = responses.get(f"question_{i}")
+            if answer is not None:
+                parts.append(answer)
+        return " ".join(parts)
+
     async def _check_knowledge_graph_for_exact_match(
         self, query: str
     ) -> Optional[ReportData]:

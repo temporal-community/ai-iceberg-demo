@@ -233,8 +233,8 @@
                     // Keep spinner visible, continue polling
                     setTimeout(pollStatus, 1000);
 
-                } else if (status.status === 'completed') {
-                    // Research complete - get result and redirect
+                } else if (status.status === 'completed' || status.status === 'match_found') {
+                    // Research complete (or early match found mid-interview) - get result and redirect
                     showSpinner(false);
                     const result = await client.getResult(workflowId);
 
@@ -331,6 +331,7 @@
                 'collecting_answers': 'status-collecting',
                 'researching': 'status-researching',
                 'completed': 'status-completed',
+                'match_found': 'status-completed',
                 'ended': 'status-ended'
             };
             return statusMap[status] || 'status-unknown';
@@ -389,7 +390,7 @@
                 } else if (status.status === 'researching') {
                     showSpinner(true);
                     pollStatus();
-                } else if (status.status === 'completed') {
+                } else if (status.status === 'completed' || status.status === 'match_found') {
                     addMessage('This conversation is complete. Starting a new one...');
                     clearWorkflowId();
                 } else if (messages.length === 0) {

@@ -307,8 +307,8 @@ async def get_status(workflow_id: str):
                         content=status.current_question,
                         message_category="clarification_question",
                     )
-            # If research is completed, save the result if it hasn't been saved yet
-            elif status.status == "completed":
+            # If research is completed (or early match found), save the result if it hasn't been saved yet
+            elif status.status in ("completed", "match_found"):
                 print(
                     f"INFO: Detected completed status for workflow {workflow_id}, checking for result..."
                 )
