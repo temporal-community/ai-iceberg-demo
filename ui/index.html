@@ -177,6 +177,75 @@
             chatContainer.scrollTop = chatContainer.scrollHeight;
         }
 
+        // Add a suggestion card with thumbs up/down buttons
+        function addSuggestion(title, summary, image) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message bot';
+
+            const bubbleDiv = document.createElement('div');
+            bubbleDiv.className = 'message-bubble bot';
+            bubbleDiv.style.flexDirection = 'column';
+            bubbleDiv.style.alignItems = 'stretch';
+            bubbleDiv.style.maxWidth = '320px';
+
+            // Truncate summary to ~120 chars
+            let truncated = summary || '';
+            if (truncated.length > 120) {
+                truncated = truncated.substring(0, 120) + '...';
+            }
+
+            const imageHtml = image
+                ? `<img src="${escapeHtml(image)}" style="width: 100%; max-height: 120px; object-fit: cover; border-radius: 6px; margin-bottom: 8px;" />`
+                : '';
+
+            bubbleDiv.innerHTML = `
+                <div style="margin-bottom: 10px; font-size: 0.95em;">I found an existing result that might match:</div>
+                <div style="font-weight: 600; font-size: 1em; margin-bottom: 6px;">${escapeHtml(title)}</div>
+                ${imageHtml}
+                <div style="font-size: 0.85em; opacity: 0.75; margin-bottom: 12px; line-height: 1.4;">${escapeHtml(truncated)}</div>
+                <div style="display: flex; gap: 8px; justify-content: center;">
+                    <button class="suggestion-btn accept-btn" style="padding: 8px 24px; border: none; border-radius: 8px; cursor: pointer; font-size: 1.2em; background: #4CAF50; color: white;">&#128077;</button>
+                    <button class="suggestion-btn reject-btn" style="padding: 8px 24px; border: none; border-radius: 8px; cursor: pointer; font-size: 1.2em; background: #f44336; color: white;">&#128078;</button>
+                </div>
+            `;
+
+            messageDiv.appendChild(bubbleDiv);
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+
+            // Wire up button handlers
+            const acceptBtn = bubbleDiv.querySelector('.accept-btn');
+            const rejectBtn = bubbleDiv.querySelector('.reject-btn');
+
+            acceptBtn.addEventListener('click', async () => {
+                acceptBtn.disabled = true;
+                rejectBtn.disabled = true;
+                acceptBtn.style.opacity = '0.5';
+                rejectBtn.style.opacity = '0.5';
+                showSpinner(true);
+                try {
+                    await client.acceptSuggestion(workflowId);
+                } catch (e) {
+                    console.error('Accept suggestion failed:', e);
+                }
+                pollStatus();
+            });
+
+            rejectBtn.addEventListener('click', async () => {
+                acceptBtn.disabled = true;
+                rejectBtn.disabled = true;
+                acceptBtn.style.opacity = '0.5';
+                rejectBtn.style.opacity = '0.5';
+                showSpinner(true);
+                try {
+                    await client.rejectSuggestion(workflowId);
+                } catch (e) {
+                    console.error('Reject suggestion failed:', e);
+                }
+                pollStatus();
+            });
+        }
+
         // Show/hide spinner
         function showSpinner(visible) {
             spinnerContainer.style.display = visible ? 'flex' : 'none';
@@ -229,6 +298,15 @@
                     // Hide spinner, show clarification question
                     showSpinner(false);
                     addMessage(status.current_question);
+                } else if (status.status === 'suggesting_result') {
+                    // A matching result was found — show suggestion with thumbs up/down
+                    showSpinner(false);
+                    addSuggestion(
+                        status.suggested_result_title || 'Existing Result',
+                        status.suggested_result_summary || '',
+                        status.suggested_result_image
+                    );
+
                 } else if (status.status === 'researching') {
                     // Keep spinner visible, continue polling
                     setTimeout(pollStatus, 1000);
@@ -332,6 +410,7 @@
                 'researching': 'status-researching',
                 'completed': 'status-completed',
                 'match_found': 'status-completed',
+                'suggesting_result': 'status-awaiting',
                 'ended': 'status-ended'
             };
             return statusMap[status] || 'status-unknown';
@@ -387,6 +466,12 @@
                     if (!lastItem || lastContent !== status.current_question) {
                         addMessage(status.current_question);
                     }
+                } else if (status.status === 'suggesting_result') {
+                    addSuggestion(
+                        status.suggested_result_title || 'Existing Result',
+                        status.suggested_result_summary || '',
+                        status.suggested_result_image
+                    );
                 } else if (status.status === 'researching') {
                     showSpinner(true);
                     pollStatus();

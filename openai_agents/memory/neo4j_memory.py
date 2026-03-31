@@ -687,6 +687,48 @@ class Neo4jMemory:
                 )
             raise Exception("Failed to link existing result node")
 
+    async def reject_result(
+        self,
+        workflow_id: str,
+        existing_result_id: str,
+    ) -> bool:
+        """
+        Create a REJECTED relationship from a Conversation to a Result node.
+        This tracks that the user was suggested this Result but declined it.
+
+        Args:
+            workflow_id: Temporal workflow ID
+            existing_result_id: ID of the Result node that was rejected
+
+        Returns:
+            True if relationship was created successfully
+        """
+        async with self.driver.session() as session:
+            try:
+                result = await session.run(
+                    """
+                    MATCH (c:Conversation {workflow_id: $workflow_id})
+                    MATCH (r:Result {result_id: $existing_result_id})
+                    CREATE (c)-[:REJECTED {timestamp: datetime()}]->(r)
+                    RETURN c.workflow_id AS wid
+                    """,
+                    workflow_id=workflow_id,
+                    existing_result_id=existing_result_id,
+                )
+                record = await result.single()
+                if record:
+                    print(
+                        f"INFO: ✅ Created REJECTED relationship: Conversation {workflow_id} -> Result {existing_result_id}"
+                    )
+                    return True
+                print(
+                    f"WARNING: Could not create REJECTED relationship — conversation or result not found"
+                )
+                return False
+            except Exception as e:
+                print(f"ERROR: Failed to create REJECTED relationship: {e}")
+                return False
+
     async def get_messages(self, workflow_id: str, limit: Optional[int] = None) -> List:
         """
         Get all messages and results for a conversation, ordered by sequence.

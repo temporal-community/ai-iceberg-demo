@@ -55,6 +55,7 @@ class KnowledgeGraphExactMatchResult:
     score: float | None = None
     result_id: str | None = None  # ID of the existing Result node in Neo4j
     image_file_path: str | None = None  # Image path from existing Result node
+    title: str | None = None
 
 
 @dataclass
@@ -110,6 +111,7 @@ async def check_knowledge_graph_exact_match(
                     score=score,
                     result_id=result_id,
                     image_file_path=image_file_path,
+                    title=node_dict.get("title", ""),
                 )
             else:
                 activity.logger.info(
@@ -217,6 +219,14 @@ class InteractiveResearchWorkflow:
         self.workflow_ended: bool = False
         self.research_initialized: bool = False
         self.early_match_found: bool = False
+        # Suggestion state for accept/reject flow
+        self.suggested_result_id: str | None = None
+        self.suggested_result_title: str | None = None
+        self.suggested_result_summary: str | None = None
+        self.suggested_result_image: str | None = None
+        self.suggested_result_data: Any | None = None  # ReportData
+        self.suggestion_accepted: bool | None = None  # None=pending, True=accepted, False=rejected
+        self.rejected_result_ids: list[str] = []
 
     def _build_result(
         self,
@@ -330,16 +340,132 @@ class InteractiveResearchWorkflow:
                     f"📋 Entering clarification flow: has_questions={bool(self.clarification_questions)}, "
                     f"num_questions={len(self.clarification_questions)}, has_report={self.report_data is not None}"
                 )
-                # If we have clarification questions, wait for responses incrementally
+                # If we have clarification questions, check similarity incrementally
                 if self.clarification_questions:
-                    # Process answers one at a time, checking similarity after each
                     answers_processed = 0
                     total_questions = len(self.clarification_questions)
                     workflow.logger.info(
                         f"🔄 Starting incremental similarity loop for {total_questions} questions"
                     )
+
                     while answers_processed < total_questions:
-                        # Wait for the next answer to arrive
+                        # If a suggestion is already pending (from start_research),
+                        # skip the similarity check and go straight to waiting
+                        if self.suggested_result_id and self.suggestion_accepted is None:
+                            exact_match = self.suggested_result_data
+                        else:
+                            # CHECK SIMILARITY (before waiting for next answer)
+                            # On first iteration this checks just the original query;
+                            # on subsequent iterations it includes answers collected so far
+                            partial_query = self.research_manager._enrich_query_partial(
+                                self.original_query,
+                                self.clarification_questions,
+                                self.clarification_responses,
+                            )
+                            workflow.logger.info(
+                                f"🔍 Checking similarity ({answers_processed}/{total_questions} answers): {partial_query[:200]}..."
+                            )
+
+                            exact_match = await self.research_manager._check_knowledge_graph_for_exact_match(
+                                partial_query, min_score=0.70
+                            )
+
+                        if exact_match:
+                            matched_result_id = self.research_manager.existing_result_id
+
+                            # Skip if this result was already rejected in this conversation
+                            if matched_result_id in self.rejected_result_ids:
+                                workflow.logger.info(
+                                    f"⏭️ Skipping previously rejected result {matched_result_id}"
+                                )
+                                exact_match = None  # Fall through to wait for next answer
+
+                        if exact_match:
+                                workflow.logger.info(
+                                    f"💡 Suggesting result ({answers_processed}/{total_questions} answers): "
+                                    f"{self.research_manager.existing_result_title}"
+                                )
+
+                                # Store suggestion and wait for user decision
+                                self.suggested_result_id = matched_result_id
+                                self.suggested_result_title = self.research_manager.existing_result_title
+                                self.suggested_result_summary = exact_match.short_summary
+                                self.suggested_result_image = self.research_manager.existing_image_path
+                                self.suggested_result_data = exact_match
+                                self.suggestion_accepted = None
+
+                                await workflow.execute_activity(
+                                    publish_workflow_event,
+                                    args=[
+                                        "suggestion_offered",
+                                        workflow.info().workflow_id,
+                                        {
+                                            "result_id": matched_result_id,
+                                            "title": self.suggested_result_title,
+                                            "answers_processed": answers_processed,
+                                            "total_questions": total_questions,
+                                        },
+                                    ],
+                                    start_to_close_timeout=timedelta(seconds=10),
+                                )
+
+                                # Wait for user to accept or reject
+                                await workflow.wait_condition(
+                                    lambda: self.suggestion_accepted is not None
+                                    or self.workflow_ended
+                                )
+
+                                if self.workflow_ended:
+                                    break
+
+                                if self.suggestion_accepted:
+                                    workflow.logger.info(
+                                        f"👍 User accepted suggestion: {matched_result_id}"
+                                    )
+                                    self.report_data = exact_match
+                                    self.research_completed = True
+                                    self.early_match_found = True
+
+                                    await workflow.execute_activity(
+                                        publish_workflow_event,
+                                        args=[
+                                            "suggestion_accepted",
+                                            workflow.info().workflow_id,
+                                            {"result_id": matched_result_id},
+                                        ],
+                                        start_to_close_timeout=timedelta(seconds=10),
+                                    )
+                                    break
+                                else:
+                                    workflow.logger.info(
+                                        f"👎 User rejected suggestion: {matched_result_id}"
+                                    )
+                                    self.rejected_result_ids.append(matched_result_id)
+                                    self.suggested_result_id = None
+                                    self.suggested_result_title = None
+                                    self.suggested_result_summary = None
+                                    self.suggested_result_image = None
+                                    self.suggested_result_data = None
+                                    self.suggestion_accepted = None
+                                    self.research_manager.existing_result_id = None
+                                    self.research_manager.existing_image_path = None
+                                    self.research_manager.existing_result_title = None
+
+                                    await workflow.execute_activity(
+                                        publish_workflow_event,
+                                        args=[
+                                            "suggestion_rejected",
+                                            workflow.info().workflow_id,
+                                            {"result_id": matched_result_id},
+                                        ],
+                                        start_to_close_timeout=timedelta(seconds=10),
+                                    )
+
+                        # If research was completed (accepted suggestion), exit loop
+                        if self.research_completed or self.workflow_ended:
+                            break
+
+                        # THEN wait for the next answer
                         workflow.logger.info(
                             f"⏳ Waiting for answer {answers_processed + 1}/{total_questions}..."
                         )
@@ -354,47 +480,8 @@ class InteractiveResearchWorkflow:
 
                         answers_processed = len(self.clarification_responses)
                         workflow.logger.info(
-                            f"📝 Received answer {answers_processed}/{total_questions}, running incremental similarity check"
+                            f"📝 Received answer {answers_processed}/{total_questions}"
                         )
-
-                        # Build partial enriched query from answers so far
-                        partial_query = self.research_manager._enrich_query_partial(
-                            self.original_query,
-                            self.clarification_questions,
-                            self.clarification_responses,
-                        )
-                        workflow.logger.info(
-                            f"🔍 Partial enriched query: {partial_query[:200]}..."
-                        )
-
-                        # Check knowledge graph for exact match with partial query
-                        exact_match = await self.research_manager._check_knowledge_graph_for_exact_match(
-                            partial_query
-                        )
-
-                        if exact_match:
-                            workflow.logger.info(
-                                f"Early match found after {answers_processed}/{len(self.clarification_questions)} answers"
-                            )
-                            self.report_data = exact_match
-                            self.research_completed = True
-                            self.early_match_found = True
-
-                            # Publish early_match_found event
-                            await workflow.execute_activity(
-                                publish_workflow_event,
-                                args=[
-                                    "early_match_found",
-                                    workflow.info().workflow_id,
-                                    {
-                                        "answers_processed": answers_processed,
-                                        "total_questions": len(self.clarification_questions),
-                                        "query": partial_query[:100],
-                                    },
-                                ],
-                                start_to_close_timeout=timedelta(seconds=10),
-                            )
-                            break
 
                     if self.workflow_ended:
                         return self._build_result(
@@ -471,6 +558,8 @@ class InteractiveResearchWorkflow:
         # Determine status based on workflow state
         if self.workflow_ended:
             status = "ended"
+        elif self.suggested_result_id and self.suggestion_accepted is None:
+            status = "suggesting_result"
         elif self.research_completed and self.early_match_found:
             status = "match_found"
         elif self.research_completed:
@@ -496,6 +585,10 @@ class InteractiveResearchWorkflow:
             status=status,
             research_completed=self.research_completed,
             early_match_found=self.early_match_found,
+            suggested_result_id=self.suggested_result_id,
+            suggested_result_title=self.suggested_result_title,
+            suggested_result_summary=self.suggested_result_summary,
+            suggested_result_image=self.suggested_result_image,
         )
 
     @workflow.update
@@ -523,6 +616,20 @@ class InteractiveResearchWorkflow:
         if result.needs_clarifications:
             # Set up clarifying questions for client to see immediately
             self.clarification_questions = result.questions or []
+
+            # If there's a suggestion from the initial query, set it up
+            # so the frontend sees "suggesting_result" status immediately
+            if result.has_suggestion and result.suggestion_data:
+                matched_id = self.research_manager.existing_result_id
+                self.suggested_result_id = matched_id
+                self.suggested_result_title = self.research_manager.existing_result_title
+                self.suggested_result_summary = result.suggestion_data.short_summary
+                self.suggested_result_image = self.research_manager.existing_image_path
+                self.suggested_result_data = result.suggestion_data
+                self.suggestion_accepted = None
+                workflow.logger.info(
+                    f"💡 Suggestion ready from initial query: {self.suggested_result_title}"
+                )
 
             # Publish clarifications_generated event
             await workflow.execute_activity(
@@ -616,6 +723,9 @@ class InteractiveResearchWorkflow:
         if self.early_match_found or self.research_completed:
             raise ValueError("Research already completed")
 
+        if self.suggested_result_id and self.suggestion_accepted is None:
+            raise ValueError("A suggestion is pending — accept or reject it first")
+
         if not self.clarification_questions or len(self.clarification_responses) >= len(
             self.clarification_questions
         ):
@@ -631,6 +741,34 @@ class InteractiveResearchWorkflow:
 
         if not self.clarification_questions:
             raise ValueError("Not awaiting clarifications")
+
+    @workflow.update
+    async def accept_suggestion(self) -> ResearchInteractionDict:
+        """Accept a suggested existing result"""
+        workflow.logger.info(f"👍 User accepted suggestion: {self.suggested_result_id}")
+        self.suggestion_accepted = True
+        return self.get_status()
+
+    @accept_suggestion.validator
+    def validate_accept_suggestion(self) -> None:
+        if not self.suggested_result_id:
+            raise ValueError("No suggestion pending")
+        if self.suggestion_accepted is not None:
+            raise ValueError("Suggestion already responded to")
+
+    @workflow.update
+    async def reject_suggestion(self) -> ResearchInteractionDict:
+        """Reject a suggested existing result"""
+        workflow.logger.info(f"👎 User rejected suggestion: {self.suggested_result_id}")
+        self.suggestion_accepted = False
+        return self.get_status()
+
+    @reject_suggestion.validator
+    def validate_reject_suggestion(self) -> None:
+        if not self.suggested_result_id:
+            raise ValueError("No suggestion pending")
+        if self.suggestion_accepted is not None:
+            raise ValueError("Suggestion already responded to")
 
     @workflow.signal
     async def end_workflow_signal(self) -> None:

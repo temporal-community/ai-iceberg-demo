@@ -431,6 +431,14 @@ async def get_status(workflow_id: str):
     if status.status == "awaiting_clarifications":
         response["current_question"] = status.get_current_question()
 
+    if status.status == "suggesting_result":
+        response["suggested_result_title"] = status.suggested_result_title
+        response["suggested_result_summary"] = status.suggested_result_summary
+        image = status.suggested_result_image
+        if image and not image.startswith("/"):
+            image = f"/{image}"
+        response["suggested_result_image"] = image
+
     return response
 
 
@@ -501,6 +509,45 @@ async def submit_answer(
         status_code=501,
         detail="Temporal integration not configured. See backend/main.py for setup instructions.",
     )
+
+
+@app.post("/api/suggestion/{workflow_id}/accept")
+async def accept_suggestion(workflow_id: str):
+    """Accept a suggested existing result."""
+    client = await get_temporal_client()
+    handle = client.get_workflow_handle(workflow_id)
+
+    await handle.execute_update(
+        InteractiveResearchWorkflow.accept_suggestion,
+    )
+
+    status = await handle.query(InteractiveResearchWorkflow.get_status)
+    return {"status": "accepted", "workflow_status": status.status}
+
+
+@app.post("/api/suggestion/{workflow_id}/reject")
+async def reject_suggestion(workflow_id: str):
+    """Reject a suggested existing result."""
+    client = await get_temporal_client()
+    handle = client.get_workflow_handle(workflow_id)
+
+    # Get the suggested result_id before rejecting (so we can save the REJECTED relationship)
+    pre_status = await handle.query(InteractiveResearchWorkflow.get_status)
+
+    await handle.execute_update(
+        InteractiveResearchWorkflow.reject_suggestion,
+    )
+
+    # Save REJECTED relationship in Neo4j
+    memory = await get_neo4j_memory()
+    if memory and pre_status.suggested_result_id:
+        try:
+            await memory.reject_result(workflow_id, pre_status.suggested_result_id)
+        except Exception as e:
+            print(f"WARNING: Failed to save REJECTED relationship: {e}")
+
+    status = await handle.query(InteractiveResearchWorkflow.get_status)
+    return {"status": "rejected", "workflow_status": status.status}
 
 
 @app.get("/api/result/{workflow_id}")

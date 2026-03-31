@@ -91,6 +91,10 @@ class ResearchInteractionDict(BaseModel):
     status: str = "pending"
     research_completed: bool = False
     early_match_found: bool = False
+    suggested_result_id: str | None = None
+    suggested_result_title: str | None = None
+    suggested_result_summary: str | None = None
+    suggested_result_image: str | None = None
     final_result: str | None = None
 
     def get_current_question(self) -> str | None:

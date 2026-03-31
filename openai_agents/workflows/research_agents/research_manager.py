@@ -59,6 +59,9 @@ class ClarificationResult:
     questions: Optional[List[str]] = None
     research_output: Optional[str] = None
     report_data: Optional[ReportData] = None
+    # Suggestion: a match at 0.70-0.79 that should be offered to the user
+    has_suggestion: bool = False
+    suggestion_data: Optional[ReportData] = None
 
 
 class InteractiveResearchManager:
@@ -80,6 +83,7 @@ class InteractiveResearchManager:
         self.existing_image_path: str | None = (
             None  # Image path from existing Result node if reused
         )
+        self.existing_result_title: str | None = None
 
     async def run(self, query: str, use_clarifications: bool = False) -> str:
         """
@@ -156,6 +160,22 @@ class InteractiveResearchManager:
                     report_data=exact_match,
                 )
 
+            # CHECK for suggestion-worthy match (0.70-0.79)
+            # These get offered to the user with thumbs up/down
+            suggestion_match = await self._check_knowledge_graph_for_exact_match(
+                query, min_score=0.70
+            )
+            suggestion_result = None
+            if suggestion_match:
+                workflow.logger.info(
+                    f"💡 Found suggestion-worthy match (0.70+) in knowledge graph"
+                )
+                suggestion_result = ClarificationResult(
+                    needs_clarifications=True,  # still generate questions as fallback
+                    has_suggestion=True,
+                    suggestion_data=suggestion_match,
+                )
+
             # SECOND: Check knowledge graph for context (similarity >= 0.5)
             # This will be used as context if we proceed with research
             kg_context = await self._search_knowledge_graph(query)
@@ -172,7 +192,10 @@ class InteractiveResearchManager:
             clarifications = self._extract_clarifications(result)
             if clarifications and isinstance(clarifications, Clarifications):
                 return ClarificationResult(
-                    needs_clarifications=True, questions=clarifications.questions
+                    needs_clarifications=True,
+                    questions=clarifications.questions,
+                    has_suggestion=suggestion_result.has_suggestion if suggestion_result else False,
+                    suggestion_data=suggestion_result.suggestion_data if suggestion_result else None,
                 )
             else:
                 # No clarifications needed, continue with research
@@ -319,17 +342,17 @@ class InteractiveResearchManager:
         return " ".join(parts)
 
     async def _check_knowledge_graph_for_exact_match(
-        self, query: str
+        self, query: str, min_score: float = 0.8
     ) -> Optional[ReportData]:
         """
-        Check if there's an exact match (similarity >= 0.8) in the knowledge graph.
-        If found, return the prior Result as a ReportData.
+        Check if there's a match in the knowledge graph at the given similarity threshold.
 
         Args:
             query: Research query
+            min_score: Minimum similarity score (default 0.8)
 
         Returns:
-            ReportData if high similarity match found, None otherwise
+            ReportData if match found above threshold, None otherwise
         """
         try:
             # Import activity types here to avoid circular imports
@@ -339,13 +362,13 @@ class InteractiveResearchManager:
             )
 
             workflow.logger.info(
-                f"🔍 Attempting to check knowledge graph for exact match (>=0.8) for query: '{query}'"
+                f"🔍 Attempting to check knowledge graph for match (>={min_score}) for query: '{query}'"
             )
 
             # Call activity instead of direct import
             result = await workflow.execute_activity(
                 check_knowledge_graph_exact_match,
-                KnowledgeGraphExactMatchInput(query=query, min_score=0.8),
+                KnowledgeGraphExactMatchInput(query=query, min_score=min_score),
                 start_to_close_timeout=timedelta(seconds=30),
             )
 
@@ -357,9 +380,10 @@ class InteractiveResearchManager:
                     f"   Result ID: {result.result_id}, Image path: {result.image_file_path}"
                 )
 
-                # Store the existing result_id and image_path for later use
+                # Store the existing result_id, image_path, and title for later use
                 self.existing_result_id = result.result_id
                 self.existing_image_path = result.image_file_path
+                self.existing_result_title = result.title
                 workflow.logger.info(
                     f"   Stored existing_image_path: {self.existing_image_path}"
                 )
@@ -386,7 +410,7 @@ class InteractiveResearchManager:
                     follow_up_questions=[],
                 )
             else:
-                workflow.logger.info(f"❌ No exact match found (similarity < 0.8)")
+                workflow.logger.info(f"❌ No match found (similarity < {min_score})")
             return None
         except Exception as e:
             workflow.logger.error(f"❌ Knowledge graph exact match check failed: {e}")

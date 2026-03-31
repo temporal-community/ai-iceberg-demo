@@ -116,6 +116,42 @@ class ResearchClient {
     return await response.json();
   }
 
+  async acceptSuggestion(workflowId) {
+    const id = workflowId || this.workflowId;
+    if (!id) {
+      throw new Error("No workflow ID available");
+    }
+
+    const response = await fetch(
+      `${this.baseUrl}/api/suggestion/${id}/accept`,
+      { method: "POST" },
+    );
+
+    if (!response.ok) {
+      throw new Error("Failed to accept suggestion");
+    }
+
+    return await response.json();
+  }
+
+  async rejectSuggestion(workflowId) {
+    const id = workflowId || this.workflowId;
+    if (!id) {
+      throw new Error("No workflow ID available");
+    }
+
+    const response = await fetch(
+      `${this.baseUrl}/api/suggestion/${id}/reject`,
+      { method: "POST" },
+    );
+
+    if (!response.ok) {
+      throw new Error("Failed to reject suggestion");
+    }
+
+    return await response.json();
+  }
+
   // Server-Sent Events for live updates
   streamStatus(workflowId, onUpdate, onComplete, onError) {
     const id = workflowId || this.workflowId;
