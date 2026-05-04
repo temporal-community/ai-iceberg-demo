@@ -48,6 +48,13 @@ For the query "Inner-north Melbourne food and drink spots" - this is broad and w
 • If clarifications needed → call transfer_to_clarifying_questions_agent
 • If specific enough → call transfer_to_research_instruction_agent
 
+Rules when Personalization context is present:
+- Use it to resolve missing preferences and reduce generic clarifying questions.
+- Do NOT ask for preferences already specified or strongly implied by personalization.
+- Ask clarifying questions only for genuinely missing decision variables not covered by personalization.
+- When routing, consider personalization as if the user already provided those preferences.
+- Do not mention the personalization context unless the user asks how you tailored the result.
+
 Return exactly ONE function-call.
 """
 

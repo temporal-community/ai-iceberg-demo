@@ -3,7 +3,7 @@ name = "openai-agents-demos"
 version = "0.1.0"
 description = "OpenAI Agents Python SDK Demo Repository"
 authors = [{ name = "Steve Androulakis", email = "steve.androulakis@temporal.io" }]
-requires-python = ">=3.10"
+requires-python = ">=3.11,<4.0"
 readme = "README.md"
 license = "MIT"
 dependencies = [
@@ -21,6 +21,7 @@ dependencies = [
     "auth0-fastapi>=1.0.0b5",
     "starlette>=0.48.0",
     "itsdangerous>=2.2.0",
+    "auth0-ai-langchain<=1.0.1",
 ]
 
 [project.urls]

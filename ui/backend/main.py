@@ -19,7 +19,10 @@ import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from contextlib import asynccontextmanager
+
 from dotenv import load_dotenv
+from auth0_ai_utils import get_google_drive_token
 from auth0_fastapi.auth import AuthClient
 from auth0_fastapi.config import Auth0Config
 from fastapi import FastAPI, HTTPException, Request, Response, Depends
@@ -45,6 +48,20 @@ from openai_agents.workflows.research_agents.research_models import (
     UserQueryInput,
 )
 
+from personalization_models import (
+    UpdateFromGoogleDocRequest,
+    PersonalizationState,
+)
+from personalization_store import (
+    get_personalization_state,
+    upsert_personalization_state,
+    close_driver as close_personalization_driver,
+)
+from personalization_merge import merge_state
+from personalization_worker_client import extract_phrases
+from google_drive_tools import drive_file_metadata, export_google_doc_text, GOOGLE_DOC_MIME
+
+
 # Load environment variables
 load_dotenv()
 
@@ -62,11 +79,17 @@ auth0_config = Auth0Config(
     clientSecret=AUTH0_CLIENT_SECRET,
     authorization_params={
         "scope": "openid profile email offline_access",
+        "audience": f"https://{AUTH0_DOMAIN}/me/",
         "prompt": "consent"
     },
     mount_connected_account_routes = True,
     appBaseUrl=BASE_URL,
-    secret=APP_SECRET_KEY
+    secret=APP_SECRET_KEY,
+    routes={
+        "login": "/login",
+        "callback": "/callback",
+        "logout": "/logout",
+    }
 )
 
 auth0_client = AuthClient(auth0_config)
@@ -98,16 +121,28 @@ def extract_h1_from_markdown(markdown: str) -> Optional[str]:
 # ============================================
 # FastAPI App Setup
 # ============================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # startup (optional)
+    yield
+    # shutdown
+    try:
+        close_personalization_driver()
+    except Exception:
+        pass
+
 app = FastAPI(
     title="Temporal Research API",
     description="Backend API for the Temporal Research Demo UI",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # CORS middleware for frontend
+_allowed_origins = [o for o in [BASE_URL, "http://localhost:8234"]]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure for your domain in production
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -216,6 +251,18 @@ async def serve_success(request: Request, response: Response):
     raise HTTPException(status_code=404, detail="Success page not found")
 
 
+@app.get("/auth/logout")
+async def logout(request: Request):
+    request.session.clear()
+
+    return RedirectResponse(
+        url=(
+            f"https://{AUTH0_DOMAIN}/v2/logout"
+            f"?client_id={AUTH0_CLIENT_ID}"
+            f"&returnTo={BASE_URL}"
+        )
+    )
+
 # Serve static assets (JS, CSS, fonts, images)
 static_path = Path(__file__).parent.parent
 if static_path.exists():
@@ -234,16 +281,38 @@ app.mount(
 
 
 @app.post("/api/start-research")
-async def start_research(request: StartResearchRequest, _auth_session = Depends(auth0_client.require_session)):
-    """
-    Start a new research workflow.
-
-    Returns:
-        workflow_id: Unique identifier for tracking the workflow
-        status: Initial status ("started")
-    """
+async def start_research(
+    request: StartResearchRequest,
+    fastapi_request: Request,
+    response: Response,
+    _auth_session=Depends(auth0_client.require_session),
+):
     client = await get_temporal_client()
     workflow_id = f"interactive-research-{uuid.uuid4().hex[:8]}"
+
+    # Identify user (same pattern as /api/personalization)
+    user = await get_userinfo_or_401(fastapi_request, response)
+    user_id = user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing sub in userinfo")
+
+    # Load personalization (may be None)
+    p = get_personalization_state(user_id)
+
+    base_query = request.query.strip()
+    enriched_query = base_query
+
+    if p:
+        topics = [t for t in (p.topic_preferences or []) if isinstance(t, str) and t.strip()]
+        interests = [i for i in (p.research_interests or []) if isinstance(i, str) and i.strip()]
+
+        if topics or interests:
+            enriched_query = (
+                f"{base_query}\n\n"
+                "Personalization context (use to tailor research relevance; do not mention unless asked):\n"
+                f"- Topic preferences: {', '.join(topics) if topics else '(none)'}\n"
+                f"- Research interests: {', '.join(interests) if interests else '(none)'}\n"
+            )
 
     handle = await client.start_workflow(
         InteractiveResearchWorkflow.run,
@@ -254,40 +323,33 @@ async def start_research(request: StartResearchRequest, _auth_session = Depends(
 
     status = await handle.execute_update(
         InteractiveResearchWorkflow.start_research,
-        UserQueryInput(query=request.query.strip()),
+        UserQueryInput(query=enriched_query),
     )
 
-    # Save conversation to Neo4j memory
+    # Persist conversation: keep original query as the user-facing query
     memory = await get_neo4j_memory()
     if memory:
-        try:
-            print(f"INFO: Saving conversation {workflow_id} to Neo4j")
-            await memory.create_conversation(
-                workflow_id=workflow_id,
-                original_query=request.query.strip(),
-                status=status.status,
-            )
-            print(f"INFO: Conversation {workflow_id} created successfully")
-            # Save the initial user query as a human message
+        await memory.create_conversation(
+            workflow_id=workflow_id,
+            original_query=base_query,
+            status=status.status,
+        )
+        await memory.add_message(
+            workflow_id=workflow_id,
+            message_type="human",
+            content=base_query,
+            message_category="initial_query",
+        )
+        # Optional: store personalization as a system/internal message for debugging/audit
+        if enriched_query != base_query:
             await memory.add_message(
                 workflow_id=workflow_id,
-                message_type="human",
-                content=request.query.strip(),
-                message_category="initial_query",
+                message_type="system",
+                content=enriched_query,
+                message_category="personalization_context",
             )
-            print(f"INFO: Initial message saved for conversation {workflow_id}")
-        except Exception as e:
-            print(f"ERROR: Failed to save conversation to Neo4j: {e}")
-            import traceback
 
-            traceback.print_exc()
-    else:
-        print("WARNING: Neo4j memory not available - conversation not persisted")
-
-    return {
-        "workflow_id": workflow_id,
-        "status": "started",
-    }
+    return {"workflow_id": workflow_id, "status": "started"}
 
 
 @app.get("/api/status/{workflow_id}")
@@ -778,7 +840,121 @@ async def get_conversation_messages(workflow_id: str, _auth_session = Depends(au
             status_code=500, detail=f"Failed to get conversation messages: {str(e)}"
         )
 
+# ============================================
+# Personalization Endpoints
+# ============================================
+async def get_userinfo_or_401(request: Request, response: Response) -> dict:
+    """
+    Fetch user identity via Auth0 /userinfo using the session token set.
+    """
+    store_options = {"request": request, "response": response}
+    user = await auth0_client.client.get_user(store_options=store_options)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return user
 
+
+@app.get("/api/google/status")
+async def google_status(
+    request: Request,
+    response: Response,
+    _auth_session=Depends(auth0_client.require_session),
+):
+    """
+    Returns whether the user's Google account is connected in Token Vault.
+    """
+    token = get_google_drive_token()
+    return {"connected": bool(token)}
+
+
+@app.get("/api/personalization")
+async def get_personalization(
+    request: Request,
+    response: Response,
+    _auth_session = Depends(auth0_client.require_session),
+):
+    user = await get_userinfo_or_401(request, response)
+    user_id = user.get("sub")
+    email = user.get("email")
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing sub in userinfo")
+
+    existing = get_personalization_state(user_id)
+    if not existing:
+        return PersonalizationState(user_id=user_id, email=email).model_dump()
+    return existing.model_dump()
+
+
+@app.post("/api/personalization/update-from-google-doc")
+async def update_from_google_doc(
+    body: UpdateFromGoogleDocRequest,
+    request: Request,
+    response: Response,
+    _auth_session = Depends(auth0_client.require_session),
+):
+    """
+    Event-driven: user shares a Google Doc → gateway reads doc text using Token Vault token
+    → worker extracts phrases → merge with existing → persist → return updated state.
+    """
+    user = await get_userinfo_or_401(request, response)
+    user_id = user.get("sub")
+    email = user.get("email")
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing sub in userinfo")
+
+    # 1) Get Google access token via Token Vault (connected accounts)
+    try:
+        store_options = {"request": request, "response": response}
+        google_access_token = await auth0_client.client.get_access_token_for_connection(
+            {"connection": "google-oauth2"},
+            store_options=store_options
+        )
+    except AccessTokenForConnectionError:
+        raise HTTPException(status_code=403, detail="Google not connected")
+
+    # 2) Fetch doc metadata & text
+    meta = await drive_file_metadata(google_access_token, body.drive_file_id)
+    if meta.get("mimeType") != GOOGLE_DOC_MIME:
+        raise HTTPException(status_code=400, detail=f"Only Google Docs supported. mimeType={meta.get('mimeType')}")
+
+    doc_text = await export_google_doc_text(google_access_token, body.drive_file_id)
+
+    # 3) Load existing personalization state (Neo4j)
+    existing = get_personalization_state(user_id) or PersonalizationState(user_id=user_id, email=email)
+
+    # 4) Extraction worker (internal service; receives text only)
+    extracted = await extract_phrases(doc_text)
+
+    # 5) Merge + cap deterministically
+    merged_topics, merged_interests = merge_state(
+        existing.topic_preferences,
+        existing.research_interests,
+        extracted.topic_preferences,
+        extracted.research_interests,
+    )
+
+    # 6) Persist
+    source_doc_ids = ([body.drive_file_id] + (existing.source_doc_ids or []))[:10]
+    source_doc_titles = ([meta.get("name", "")] + (existing.source_doc_titles or []))[:10]
+
+    updated = PersonalizationState(
+        user_id=user_id,
+        email=email or existing.email,
+        topic_preferences=merged_topics,
+        research_interests=merged_interests,
+        source_doc_ids=source_doc_ids,
+        source_doc_titles=source_doc_titles,
+    )
+    saved = upsert_personalization_state(updated)
+
+    return saved.model_dump()
+
+
+# ============================================
+# Health Endpoint
+# ============================================
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint"""

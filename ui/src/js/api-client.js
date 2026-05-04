@@ -1,25 +1,38 @@
 // Research API Client
-// Handles communication with FastAPI backend
+// Handles communication with FastAPI backend (session-cookie auth)
 
 class ResearchClient {
-  constructor(baseUrl = "http://localhost:8233") {
-    this.baseUrl = baseUrl;
+  constructor(baseUrl = "") {
+    // Use same-origin by default. If you set baseUrl to another origin,
+    // your backend must allow that origin + credentials in CORS.
+    this.baseUrl = (baseUrl || "").replace(/\/$/, "");
     this.workflowId = null;
     this.eventSource = null;
   }
 
+  async _fetch(path, options = {}) {
+    const url = `${this.baseUrl}${path}`;
+    const response = await fetch(url, {
+      credentials: "include",
+      ...options,
+    });
+
+    if (response.status === 401) {
+      window.location.href = "/auth/login";
+      throw new Error("Not authenticated");
+    }
+
+    return response;
+  }
+
   async startResearch(query) {
-    const response = await fetch(`${this.baseUrl}/api/start-research`, {
+    const response = await this._fetch(`/api/start-research`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query }),
     });
 
-    if (!response.ok) {
-      throw new Error("Failed to start research");
-    }
+    if (!response.ok) throw new Error("Failed to start research");
 
     const data = await response.json();
     this.workflowId = data.workflow_id;
@@ -28,100 +41,103 @@ class ResearchClient {
 
   async getStatus(workflowId = null) {
     const id = workflowId || this.workflowId;
-    if (!id) {
-      throw new Error("No workflow ID available");
-    }
+    if (!id) throw new Error("No workflow ID available");
 
-    const response = await fetch(`${this.baseUrl}/api/status/${id}`);
-
-    if (!response.ok) {
-      throw new Error("Failed to get status");
-    }
-
+    const response = await this._fetch(`/api/status/${id}`);
+    if (!response.ok) throw new Error("Failed to get status");
     return await response.json();
   }
 
   async submitAnswer(answer, workflowId = null, currentQuestionIndex = 0) {
     const id = workflowId || this.workflowId;
-    if (!id) {
-      throw new Error("No workflow ID available");
-    }
+    if (!id) throw new Error("No workflow ID available");
 
-    const response = await fetch(
-      `${this.baseUrl}/api/answer/${id}/${currentQuestionIndex}`,
+    const response = await this._fetch(
+      `/api/answer/${id}/${currentQuestionIndex}`,
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ answer }),
       },
     );
 
-    if (!response.ok) {
-      throw new Error("Failed to submit answer");
-    }
-
+    if (!response.ok) throw new Error("Failed to submit answer");
     return await response.json();
   }
 
   async getResult(workflowId = null) {
     const id = workflowId || this.workflowId;
-    if (!id) {
-      throw new Error("No workflow ID available");
-    }
+    if (!id) throw new Error("No workflow ID available");
 
-    const response = await fetch(`${this.baseUrl}/api/result/${id}`);
-
-    if (!response.ok) {
-      throw new Error("Result not ready or failed");
-    }
-
+    const response = await this._fetch(`/api/result/${id}`);
+    if (!response.ok) throw new Error("Result not ready or failed");
     return await response.json();
   }
 
   async listConversations(limit = 50, offset = 0) {
-    const response = await fetch(
-      `${this.baseUrl}/api/conversations?limit=${limit}&offset=${offset}`,
+    const response = await this._fetch(
+      `/api/conversations?limit=${limit}&offset=${offset}`,
     );
-
-    if (!response.ok) {
-      throw new Error("Failed to list conversations");
-    }
-
+    if (!response.ok) throw new Error("Failed to list conversations");
     return await response.json();
   }
 
   async getConversation(workflowId) {
-    const response = await fetch(
-      `${this.baseUrl}/api/conversations/${workflowId}`,
-    );
-
-    if (!response.ok) {
-      throw new Error("Failed to get conversation");
-    }
-
+    const response = await this._fetch(`/api/conversations/${workflowId}`);
+    if (!response.ok) throw new Error("Failed to get conversation");
     return await response.json();
   }
 
   async getConversationMessages(workflowId) {
-    const response = await fetch(
-      `${this.baseUrl}/api/conversations/${workflowId}/messages`,
+    const response = await this._fetch(
+      `/api/conversations/${workflowId}/messages`,
+    );
+    if (!response.ok) throw new Error("Failed to get conversation messages");
+    return await response.json();
+  }
+
+  // ---- Personalization / Google connected account ----
+  async googleStatus() {
+    const response = await this._fetch(`/api/google/status`);
+    if (!response.ok) throw new Error("Failed to get Google connection status");
+    return await response.json(); // { connected: boolean }
+  }
+
+  async getPersonalization() {
+    const response = await this._fetch(`/api/personalization`);
+    if (!response.ok) throw new Error("Failed to get personalization state");
+    return await response.json();
+  }
+
+  async updatePersonalizationFromGoogleDoc(driveFileId) {
+    const response = await this._fetch(
+      `/api/personalization/update-from-google-doc`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ drive_file_id: driveFileId }),
+      },
     );
 
+    if (response.status === 403) {
+      window.location.href = "/auth/connect?connection=google-oauth2";
+      throw new Error("Google not connected");
+    }
+
     if (!response.ok) {
-      throw new Error("Failed to get conversation messages");
+      const text = await response.text().catch(() => "");
+      throw new Error(
+        `Failed to update personalization (${response.status}): ${text}`,
+      );
     }
 
     return await response.json();
   }
 
-  // Server-Sent Events for live updates
+  // Server-Sent Events for live updates (currently backend returns 501)
   streamStatus(workflowId, onUpdate, onComplete, onError) {
     const id = workflowId || this.workflowId;
-    if (!id) {
-      throw new Error("No workflow ID available");
-    }
+    if (!id) throw new Error("No workflow ID available");
 
     this.eventSource = new EventSource(`${this.baseUrl}/api/stream/${id}`);
 
@@ -149,7 +165,6 @@ class ResearchClient {
     }
   }
 
-  // Polling alternative (if SSE not preferred)
   async pollStatus(workflowId, onUpdate, interval = 2000) {
     const id = workflowId || this.workflowId;
 
@@ -170,7 +185,6 @@ class ResearchClient {
   }
 }
 
-// Export for use in HTML
 if (typeof window !== "undefined") {
   window.ResearchClient = ResearchClient;
 }

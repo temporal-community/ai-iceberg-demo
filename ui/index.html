@@ -20,6 +20,51 @@
         <h1 class="main-heading">Build Durable Agents</h1>
         <p class="subtitle">Powered by Temporal</p>
 
+        <div class="personalization-panel" id="personalizationPanel">
+          <div class="personalization-header">
+            <div>
+              <div class="personalization-title">Personalization</div>
+              <div class="personalization-subtitle">Import a Google Doc to extract topic preferences + research interests</div>
+            </div>
+
+            <div class="personalization-actions">
+              <span class="pill" id="googleConnectionPill">Google: checking…</span>
+              <a class="btn secondary" id="connectGoogleBtn" href="/auth/connect?connection=google-oauth2" style="display:none;">
+                Connect Google
+              </a>
+            </div>
+          </div>
+
+          <div class="personalization-body">
+            <div class="personalization-row">
+              <input
+                id="googleDocInput"
+                class="text-input"
+                type="text"
+                placeholder="Paste a Google Doc link (or file id)"
+                autocomplete="off"
+              />
+              <button class="btn" id="importGoogleDocBtn">Import</button>
+            </div>
+
+            <div class="personalization-error" id="personalizationError" style="display:none;"></div>
+
+            <div class="personalization-result" id="personalizationResult" style="display:none;">
+              <div class="personalization-columns">
+                <div class="personalization-col">
+                  <h3>Topic Preferences</h3>
+                  <ul id="topicPreferencesList"></ul>
+                </div>
+                <div class="personalization-col">
+                  <h3>Research Interests</h3>
+                  <ul id="researchInterestsList"></ul>
+                </div>
+              </div>
+              <div class="personalization-meta" id="personalizationMeta"></div>
+            </div>
+          </div>
+        </div>
+
         <!-- Conversation History Sidebar -->
         <div class="conversation-history" id="conversationHistory" style="display: none;">
             <div class="conversation-history-header">
@@ -36,6 +81,10 @@
             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M3 12h18M3 6h18M3 18h18"/>
             </svg>
+        </button>
+
+        <button class="btn secondary" id="logout-btn" type="button">
+          Log out
         </button>
 
         <!-- Chat Container -->
@@ -160,6 +209,7 @@
 
         // Load conversation history on page load
         loadConversationHistory();
+        initPersonalization();
 
         // Add message to chat with animation
         function addMessage(text, isUser = false) {
@@ -282,6 +332,61 @@
                 // Hide history button if Neo4j is not available
                 document.getElementById('showHistoryBtn').style.display = 'none';
             }
+        }
+
+        async function initPersonalization() {
+            const pill = document.getElementById("googleConnectionPill");
+            const connectBtn = document.getElementById("connectGoogleBtn");
+            const importBtn = document.getElementById("importGoogleDocBtn");
+            const input = document.getElementById("googleDocInput");
+
+            try {
+                const status = await client.googleStatus();
+                if (status.connected) {
+                  pill.textContent = "Google: connected";
+                  connectBtn.style.display = "none";
+                } else {
+                  pill.textContent = "Google: not connected";
+                  connectBtn.style.display = "inline-flex";
+                }
+            } catch (e) {
+                pill.textContent = "Google: unknown";
+                connectBtn.style.display = "inline-flex";
+            }
+
+            // Preload any existing personalization state (optional but nice)
+            try {
+                const state = await client.getPersonalization();
+                if ((state.topic_preferences && state.topic_preferences.length) ||
+                    (state.research_interests && state.research_interests.length)) {
+                    renderPersonalization(state);
+                }
+            } catch (_) {}
+
+            importBtn.addEventListener("click", async () => {
+                setPersonalizationError(null);
+
+                const fileId = extractDriveFileId(input.value);
+                if (!fileId) {
+                    setPersonalizationError("Could not extract a Google Drive file id from that input.");
+                    return;
+                }
+
+                importBtn.disabled = true;
+                importBtn.textContent = "Importing…";
+
+                try {
+                    const updated = await client.updatePersonalizationFromGoogleDoc(fileId);
+                    renderPersonalization(updated);
+                    pill.textContent = "Google: connected";
+                    connectBtn.style.display = "none";
+                } catch (e) {
+                    setPersonalizationError(e?.message || "Import failed.");
+                } finally {
+                    importBtn.disabled = false;
+                    importBtn.textContent = "Import";
+                }
+            });
         }
 
         // Display conversation history in sidebar
@@ -420,6 +525,58 @@
             document.getElementById('conversationHistory').style.display = 'none';
         }
 
+        function extractDriveFileId(input) {
+            if (!input) return null;
+            const s = input.trim();
+
+            // Already looks like a Drive file id
+            if (/^[a-zA-Z0-9_-]{20,}$/.test(s) && !s.includes("http")) return s;
+
+            // Common URL formats:
+            // https://docs.google.com/document/d/<ID>/edit
+            let m = s.match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
+            if (m && m[1]) return m[1];
+
+            // https://drive.google.com/file/d/<ID>/view
+            m = s.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+            if (m && m[1]) return m[1];
+
+            // ...?id=<ID>
+            m = s.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+            if (m && m[1]) return m[1];
+
+          return null;
+        }
+
+        function setPersonalizationError(msg) {
+            const el = document.getElementById("personalizationError");
+            if (!msg) {
+              el.style.display = "none";
+              el.textContent = "";
+              return;
+            }
+            el.style.display = "block";
+            el.textContent = msg;
+        }
+
+        function renderPersonalization(state) {
+            const resultEl = document.getElementById("personalizationResult");
+            const tpList = document.getElementById("topicPreferencesList");
+            const riList = document.getElementById("researchInterestsList");
+            const metaEl = document.getElementById("personalizationMeta");
+
+            const tp = state.topic_preferences || [];
+            const ri = state.research_interests || [];
+
+            tpList.innerHTML = tp.map(x => `<li>${x}</li>`).join("");
+            riList.innerHTML = ri.map(x => `<li>${x}</li>`).join("");
+
+            const titles = (state.source_doc_titles || []).filter(Boolean);
+            metaEl.textContent = titles.length ? `Sources: ${titles.join(" • ")}` : "";
+
+            resultEl.style.display = "block";
+        }
+
         // Event listeners
         submitButton.addEventListener('click', handleSubmit);
         userInput.addEventListener('keypress', (e) => {
@@ -431,6 +588,11 @@
         // Conversation history UI
         document.getElementById('showHistoryBtn').addEventListener('click', showConversationHistory);
         document.getElementById('closeHistoryBtn').addEventListener('click', hideConversationHistory);
+        document
+          .getElementById("logout-btn")
+          .addEventListener("click", () => {
+            window.location.href = "/auth/logout";
+          });
     </script>
 </body>
 </html>

@@ -48,6 +48,32 @@ with workflow.unsafe.imports_passed_through():
     )
 
 
+def _extract_personalization_block(query: str) -> tuple[str, str | None]:
+    """
+    If the query contains the appended block from /api/start-research:
+      "Personalization context (use to tailor research relevance; do not mention unless asked): ..."
+    split it out and return: (base_query, personalization_system_message).
+    """
+    marker = "Personalization context (use to tailor research relevance; do not mention unless asked):"
+    if not query:
+        return "", None
+
+    idx = query.find(marker)
+    if idx == -1:
+        return query.strip(), None
+
+    base = query[:idx].strip()
+    block = query[idx:].strip()
+
+    # Convert to a true system-style instruction (still user-provided context)
+    personalization_system_message = (
+        "You have user personalization context. Use it to improve relevance and prioritization. "
+        "Do not mention it unless the user asks.\n\n"
+        f"{block}"
+    )
+    return base, personalization_system_message
+
+
 @dataclass
 class ClarificationResult:
     """Result from initial clarification check"""
@@ -77,6 +103,13 @@ class InteractiveResearchManager:
         self.existing_image_path: str | None = (
             None  # Image path from existing Result node if reused
         )
+
+    def _make_input_str(self, user_content: str, personalization_system_message: str | None) -> str:
+        # Avoid passing dict/list message objects to Runner (your earlier type mismatch).
+        # Keep Runner inputs as strings (your file already uses strings for planner/search/writer/etc).
+        if personalization_system_message:
+            return f"{personalization_system_message}\n\nUSER_QUERY:\n{user_content}"
+        return user_content
 
     async def run(self, query: str, use_clarifications: bool = False) -> str:
         """
@@ -141,9 +174,11 @@ class InteractiveResearchManager:
         """Start clarification flow and return whether clarifications are needed"""
         trace_id = gen_trace_id()
         with trace("Clarification check", trace_id=trace_id):
+            base_query, personalization_system_message = _extract_personalization_block(query)
+
             # FIRST: Check knowledge graph for exact match (similarity >= 0.8)
             # If found, return it directly without clarifications or new research
-            exact_match = await self._check_knowledge_graph_for_exact_match(query)
+            exact_match = await self._check_knowledge_graph_for_exact_match(base_query)
             if exact_match:
                 workflow.logger.info(
                     "Found exact match in knowledge graph, returning prior result"
@@ -155,13 +190,14 @@ class InteractiveResearchManager:
 
             # SECOND: Check knowledge graph for context (similarity >= 0.5)
             # This will be used as context if we proceed with research
-            kg_context = await self._search_knowledge_graph(query)
+            kg_context = await self._search_knowledge_graph(base_query)
 
             # THIRD: Start with triage agent to determine if clarifications are needed
-            input_items: list[TResponseInputItem] = [{"content": query, "role": "user"}]
+            # input_items: list[TResponseInputItem] = [{"content": query, "role": "user"}]
+            triage_input = self._make_input_str(base_query, personalization_system_message)
             result = await Runner.run(
                 self.triage_agent,
-                input_items,
+                triage_input,
                 run_config=self.run_config,
             )
 
@@ -177,12 +213,12 @@ class InteractiveResearchManager:
                 workflow.logger.info(
                     "Starting image generation in parallel with research pipeline"
                 )
-                image_task = asyncio.create_task(self._generate_research_image(query))
+                image_task = asyncio.create_task(self._generate_research_image(base_query, personalization_system_message))
 
                 # Use knowledge graph context if available (already fetched above)
                 # Perform research pipeline (planning, searching, writing)
-                search_plan = await self._plan_searches(query)
-                search_results = await self._perform_searches(search_plan)
+                search_plan = await self._plan_searches(base_query, personalization_system_message)
+                search_results = await self._perform_searches(search_plan, personalization_system_message)
 
                 # Combine knowledge graph context with web search results
                 all_results = []
@@ -190,7 +226,7 @@ class InteractiveResearchManager:
                     all_results.append(f"Knowledge Graph Context:\n{kg_context}")
                 all_results.extend(search_results)
 
-                report = await self._write_report(query, all_results)
+                report = await self._write_report(query, all_results, personalization_system_message)
 
                 # Wait for image generation to complete (if not already done)
                 workflow.logger.info("Waiting for image generation to complete")
@@ -213,7 +249,8 @@ class InteractiveResearchManager:
         trace_id = gen_trace_id()
         with trace("Enhanced Research with clarifications", trace_id=trace_id):
             # Enrich the query with clarification responses
-            enriched_query = self._enrich_query(original_query, questions, responses)
+            base_query, personalization_system_message = _extract_personalization_block(original_query)
+            enriched_query = self._enrich_query(base_query, questions, responses)
 
             # FIRST: Check knowledge graph for exact match with enriched query (similarity >= 0.8)
             exact_match = await self._check_knowledge_graph_for_exact_match(
@@ -237,8 +274,8 @@ class InteractiveResearchManager:
             kg_context = await self._search_knowledge_graph(enriched_query)
 
             # THIRD: Perform research pipeline (planning, searching, writing)
-            search_plan = await self._plan_searches(enriched_query)
-            search_results = await self._perform_searches(search_plan)
+            search_plan = await self._plan_searches(enriched_query, personalization_system_message)
+            search_results = await self._perform_searches(search_plan, personalization_system_message)
 
             # Combine knowledge graph context with web search results
             all_results = []
@@ -246,7 +283,7 @@ class InteractiveResearchManager:
                 all_results.append(f"Knowledge Graph Context:\n{kg_context}")
             all_results.extend(search_results)
 
-            report = await self._write_report(enriched_query, all_results)
+            report = await self._write_report(enriched_query, all_results, personalization_system_message)
 
             # Wait for image generation to complete (if not already done)
             workflow.logger.info("Waiting for image generation to complete")
@@ -405,8 +442,9 @@ class InteractiveResearchManager:
             traceback.print_exc()
             return None
 
-    async def _plan_searches(self, query: str) -> WebSearchPlan:
-        input_str: str = f"Query: {query}"
+    async def _plan_searches(self, query: str, personalization_system_message: str | None = None) -> WebSearchPlan:
+        # input_str: str = f"Query: {query}"
+        input_str = self._make_input_str(f"Query: {query}", personalization_system_message)
         result = await Runner.run(
             self.planner_agent,
             input_str,
@@ -414,7 +452,7 @@ class InteractiveResearchManager:
         )
         return result.final_output_as(WebSearchPlan)
 
-    async def _perform_searches(self, search_plan: WebSearchPlan) -> list[str]:
+    async def _perform_searches(self, search_plan: WebSearchPlan, personalization_system_message: str | None = None) -> list[str]:
         with custom_span("Search the web"):
             num_completed = 0
             tasks = [
@@ -442,10 +480,11 @@ class InteractiveResearchManager:
         except Exception:
             return None
 
-    async def _write_report(self, query: str, search_results: list[str]) -> ReportData:
+    async def _write_report(self, query: str, search_results: list[str], personalization_system_message: str | None = None) -> ReportData:
         input_str: str = (
             f"Original query: {query}\nSummarized search results: {search_results}"
         )
+        input_str = self._make_input_str(input_str, personalization_system_message)
 
         # Generate markdown report
         markdown_result = await Runner.run(
@@ -458,7 +497,7 @@ class InteractiveResearchManager:
         return report_data
 
     async def _generate_research_image(
-        self, query: str
+        self, query: str, _personalization_system_message: str | None = None
     ) -> tuple[str | None, str | None]:
         """
         Generate an image for the research topic using ImageGenAgent.
